@@ -1,6 +1,5 @@
 <script>
 	import { onMount } from 'svelte';
-	/* STREAMING_CHUNK:Importing shadcn-svelte components and icons */
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -14,78 +13,46 @@
 		{ id: 'node-gamma', name: 'Gamma Station - Main', location: 'Central Hub' }
 	];
 
-	// shadcn-svelte components bind naturally to values, so we derive the selected node
 	let selectedNodeId = nodes[0].id;
 	$: selectedNode = nodes.find((n) => n.id === selectedNodeId) || nodes[0];
 
-	let timespan = '24h'; // '1h', '24h', '7d', '30d'
+	let timespan = '24h';
 
 	let chartCanvas;
 	let chartInstance = null;
 	let isChartJsLoaded = false;
 	let isAddingNode = false;
 
+	let isFetchingData = false;
+
 	// Reactively re-render chart whenever shadcn Tabs or Dropdown values change
 	$: if (isChartJsLoaded && (timespan || selectedNodeId)) {
 		renderChart();
 	}
-	// --- Mock Data Generator ---
-	function generateMockData(span) {
-		let dataPoints = 24;
-		let labels = [];
-		const now = new Date();
 
-		if (span === '1h') dataPoints = 60;
-		else if (span === '24h') dataPoints = 24;
-		else if (span === '7d') dataPoints = 7;
-		else if (span === '30d') dataPoints = 30;
-
-		let busV = [];
-		let busI = [];
-		let electrodeV = [];
-		let predictedV = [];
-		let humidity = [];
-
-		for (let i = dataPoints; i >= 0; i--) {
-			// Generate Time Labels
-			let time = new Date(now);
-			if (span === '1h') time.setMinutes(now.getMinutes() - i);
-			else if (span === '24h') time.setHours(now.getHours() - i);
-			else if (span === '7d' || span === '30d') time.setDate(now.getDate() - i);
-
-			const label =
-				span === '1h' || span === '24h'
-					? time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-					: time.toLocaleDateString([], { month: 'short', day: 'numeric' });
-			labels.push(label);
-
-			// Generate realistic-looking telemetry data with some random variance
-			const baseBusV = 24.0 + (Math.random() * 0.5 - 0.25);
-			const baseBusI = 12.0 + (Math.random() * 0.8 - 0.4);
-			const baseElectrode = -0.95 + (Math.random() * 0.04 - 0.02);
-			const baseHum = 45.0 + (Math.random() * 2 - 1);
-
-			busV.push(baseBusV);
-			busI.push(baseBusI);
-			electrodeV.push(baseElectrode);
-
-			// AI Prediction Logic: Follows historical closely, then diverges slightly to simulate forecasting
-			if (i < dataPoints * 0.2) {
-				predictedV.push(baseElectrode + (Math.random() * 0.08 - 0.04));
-			} else {
-				predictedV.push(baseElectrode + 0.005);
-			}
-			humidity.push(baseHum);
+	// --- Real Data Fetcher ---
+	async function fetchRealData(span, node) {
+		try {
+			isFetchingData = true;
+			const response = await fetch(`/api/telemetry?timespan=${span}&node=${node}`);
+			if (!response.ok) throw new Error('Failed to fetch data');
+			const data = await response.json();
+			return data;
+		} catch (error) {
+			console.error('Error fetching from API:', error);
+			// Return empty arrays so the chart doesn't crash on failure
+			return { labels: [], busV: [], busI: [], electrodeV: [], predictedV: [], humidity: [] };
+		} finally {
+			isFetchingData = false;
 		}
-
-		return { labels, busV, busI, electrodeV, predictedV, humidity };
 	}
 
 	// --- Chart Rendering ---
-	function renderChart() {
+	async function renderChart() {
 		if (!isChartJsLoaded || !chartCanvas) return;
 
-		const data = generateMockData(timespan);
+		// Fetch real data from our SvelteKit API
+		const data = await fetchRealData(timespan, selectedNodeId);
 
 		if (chartInstance) {
 			chartInstance.destroy();
@@ -93,7 +60,7 @@
 
 		const ctx = chartCanvas.getContext('2d');
 
-		// @ts-ignore - Chart is loaded globally via dynamic script tag
+		// @ts-ignore
 		chartInstance = new Chart(ctx, {
 			type: 'line',
 			data: {
@@ -102,7 +69,7 @@
 					{
 						label: 'Bus Voltage (V)',
 						data: data.busV,
-						borderColor: '#eab308', // yellow-500
+						borderColor: '#eab308',
 						backgroundColor: 'rgba(234, 179, 8, 0.1)',
 						yAxisID: 'yVoltage',
 						tension: 0.4,
@@ -113,8 +80,19 @@
 					{
 						label: 'Bus Current (A)',
 						data: data.busI,
-						borderColor: '#ef4444', // red-500
+						borderColor: '#ef4444',
 						backgroundColor: 'rgba(239, 68, 68, 0.1)',
+						yAxisID: 'yCurrent',
+						tension: 0.4,
+						borderWidth: 2,
+						pointRadius: 0,
+						pointHitRadius: 10
+					},
+					{
+						label: 'Target Current (mA)',
+						data: data.TbusI,
+						borderColor: '#22c55e',
+						backgroundColor: 'rgba(34, 197, 94, 0.1)',
 						yAxisID: 'yCurrent',
 						tension: 0.4,
 						borderWidth: 2,
@@ -124,7 +102,7 @@
 					{
 						label: 'Electrode Voltage (V)',
 						data: data.electrodeV,
-						borderColor: '#3b82f6', // blue-500
+						borderColor: '#3b82f6',
 						backgroundColor: 'rgba(59, 130, 246, 0.1)',
 						yAxisID: 'yElectrode',
 						tension: 0.4,
@@ -135,7 +113,7 @@
 					{
 						label: 'AI Predicted Electrode (V)',
 						data: data.predictedV,
-						borderColor: '#a855f7', // purple-500
+						borderColor: '#a855f7',
 						backgroundColor: 'rgba(168, 85, 247, 0.1)',
 						borderDash: [5, 5],
 						yAxisID: 'yElectrode',
@@ -147,7 +125,7 @@
 					{
 						label: 'Soil Humidity (%)',
 						data: data.humidity,
-						borderColor: '#22c55e', // green-500
+						borderColor: '#22c55e',
 						backgroundColor: 'rgba(34, 197, 94, 0.1)',
 						yAxisID: 'yHumidity',
 						tension: 0.4,
@@ -164,74 +142,43 @@
 					mode: 'index',
 					intersect: false
 				},
+				// Adding a gentle animation for when data loads from DB
+				animation: { duration: 500 },
 				plugins: {
-					legend: {
-						position: 'top',
-						labels: { usePointStyle: true, boxWidth: 8, font: { family: "'Inter', sans-serif" } }
-					},
-					tooltip: {
-						backgroundColor: 'rgba(15, 23, 42, 0.9)',
-						titleFont: { family: "'Inter', sans-serif", size: 13 },
-						bodyFont: { family: "'Inter', sans-serif", size: 12 },
-						padding: 10,
-						cornerRadius: 8,
-						boxPadding: 4
-					}
+					legend: { position: 'top', labels: { usePointStyle: true, boxWidth: 8 } },
+					tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', padding: 10, cornerRadius: 8 }
 				},
 				scales: {
-					x: {
-						grid: { display: false },
-						ticks: { font: { family: "'Inter', sans-serif" }, maxTicksLimit: 8 }
-					},
+					x: { grid: { display: false } },
 					yVoltage: {
 						type: 'linear',
 						display: true,
 						position: 'left',
-						title: {
-							display: true,
-							text: 'Bus Voltage (V)',
-							font: { size: 11, family: "'Inter', sans-serif" },
-							color: '#eab308'
-						},
+						title: { display: true, text: 'Bus Voltage (V)', color: '#eab308' },
 						grid: { color: 'rgba(0,0,0,0.04)' }
 					},
 					yCurrent: {
 						type: 'linear',
 						display: true,
 						position: 'right',
-						title: {
-							display: true,
-							text: 'Bus Current (A)',
-							font: { size: 11, family: "'Inter', sans-serif" },
-							color: '#ef4444'
-						},
+						title: { display: true, text: 'Bus Current (A)', color: '#ef4444' },
 						grid: { drawOnChartArea: false }
 					},
 					yElectrode: {
 						type: 'linear',
 						display: true,
 						position: 'left',
-						title: {
-							display: true,
-							text: 'Electrode (V)',
-							font: { size: 11, family: "'Inter', sans-serif" },
-							color: '#3b82f6'
-						},
+						title: { display: true, text: 'Electrode (V)', color: '#3b82f6' },
 						grid: { drawOnChartArea: false }
 					},
 					yHumidity: {
 						type: 'linear',
 						display: true,
 						position: 'right',
-						title: {
-							display: true,
-							text: 'Humidity (%)',
-							font: { size: 11, family: "'Inter', sans-serif" },
-							color: '#22c55e'
-						},
+						title: { display: true, text: 'Humidity (%)', color: '#22c55e' },
 						grid: { drawOnChartArea: false },
 						min: 0,
-						max: 100
+						max: 3
 					}
 				}
 			}
@@ -239,26 +186,20 @@
 	}
 
 	onMount(() => {
-		// Dynamically load Chart.js to keep this component entirely self-contained
 		const script = document.createElement('script');
 		script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
 		script.onload = () => {
 			isChartJsLoaded = true;
-			renderChart();
+			// The reactive statement $: if(isChartJsLoaded) will handle the initial render now
 		};
 		document.head.appendChild(script);
 
-		// Cleanup chart and script on unmount
 		return () => {
 			if (chartInstance) chartInstance.destroy();
-			if (document.head.contains(script)) {
-				document.head.removeChild(script);
-			}
+			if (document.head.contains(script)) document.head.removeChild(script);
 		};
 	});
 
-	// --- Actions ---
-	/* STREAMING_CHUNK:Refactoring action handlers */
 	function handleAddNode() {
 		isAddingNode = true;
 		setTimeout(() => {
@@ -358,7 +299,7 @@
 				<Card.Header class="pb-2">
 					<Card.Title class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
 						<div class="h-2 w-2 rounded-full bg-yellow-500"></div>
-						 Bus Voltage
+						Bus Voltage
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
@@ -372,7 +313,7 @@
 				<Card.Header class="pb-2">
 					<Card.Title class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
 						<div class="h-2 w-2 rounded-full bg-red-500"></div>
-						 Bus Current
+						Bus Current
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
@@ -386,7 +327,7 @@
 				<Card.Header class="pb-2">
 					<Card.Title class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
 						<div class="h-2 w-2 rounded-full bg-blue-500"></div>
-						 Current Electrode
+						Current Electrode
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
@@ -427,11 +368,15 @@
 			</Card.Header>
 			<Card.Content>
 				<div class="relative mt-4 h-[450px] w-full">
-					{#if !isChartJsLoaded}
-						<div class="absolute inset-0 flex items-center justify-center rounded-xl bg-muted/50">
+					{#if !isChartJsLoaded || isFetchingData}
+						<div
+							class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-background/80 backdrop-blur-sm transition-all"
+						>
 							<div class="flex flex-col items-center text-muted-foreground">
 								<Loader2 class="mb-4 h-8 w-8 animate-spin text-primary" />
-								<span class="text-sm font-medium">Initializing AI Charting Engine...</span>
+								<span class="text-sm font-medium">
+									{!isChartJsLoaded ? 'Initializing Charting Engine...' : 'Fetching Live Data...'}
+								</span>
 							</div>
 						</div>
 					{/if}

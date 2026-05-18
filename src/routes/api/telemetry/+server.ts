@@ -21,7 +21,7 @@ interface InfluxRow {
 
 export const GET: RequestHandler = async ({ url }) => {
   const timespan = url.searchParams.get('timespan') || '24h';
-  const nodeId = url.searchParams.get('node') || 'node-alpha';
+  // const nodeId = url.searchParams.get('node') || '001';
 
   // Map the UI timespans to InfluxDB time ranges and aggregation windows
   const timeConfig: Record<string, TimeConfig> = {
@@ -44,8 +44,6 @@ export const GET: RequestHandler = async ({ url }) => {
   const fluxQuery = `
         from(bucket:"${env.INFLUX_BUCKET}")
             |> range(start: ${config.range})
-            |> filter(fn: (r) => r._measurement == "ICCP")
-            |> filter(fn: (r) => r.node_id == "${nodeId}")
             |> filter(fn: (r) => r._field == "bus_voltage_V" or r._field == "current_mA" or r._field == "electrode_V" or r._field == "soil_humidity_V" or r._field == "target_current_mA")
             |> aggregateWindow(every: ${config.window}, fn: mean, createEmpty: false)
             |> yield(name: "mean")
@@ -57,11 +55,12 @@ export const GET: RequestHandler = async ({ url }) => {
     const datasets: {
       busV: (number | null)[];
       busI: (number | null)[];
+      TbusI: (number | null)[];
       electrodeV: (number | null)[];
       humidity: (number | null)[];
       predictedV: (number | null)[];
     } = {
-      busV: [], busI: [], electrodeV: [], humidity: [], predictedV: []
+      busV: [], busI: [], TbusI: [], electrodeV: [], humidity: [], predictedV: []
     };
 
     // We use a Set to track unique timestamps so we don't duplicate labels
@@ -96,13 +95,14 @@ export const GET: RequestHandler = async ({ url }) => {
         return row ? row._value : null;
       };
 
-      datasets.busV.push(getVal('bus_voltage'));
-      datasets.busI.push(getVal('bus_current'));
-      datasets.electrodeV.push(getVal('electrode_voltage'));
-      datasets.humidity.push(getVal('humidity'));
+      datasets.busV.push(getVal('bus_voltage_V'));
+      datasets.busI.push(getVal('current_mA'));
+      datasets.TbusI.push(getVal('target_current_mA'));
+      datasets.electrodeV.push(getVal('electrode_V'));
+      datasets.humidity.push(getVal('soil_humidity_V'));
 
       // Dummy AI prediction logic (replace with real DB query if AI stores to Influx)
-      const elV = getVal('electrode_voltage');
+      const elV = getVal('electrode_V');
       datasets.predictedV.push(elV !== null ? elV + 0.02 : null);
     });
 
