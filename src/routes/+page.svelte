@@ -1,34 +1,51 @@
-<script>
-	import { onMount } from 'svelte';
+<script lang="ts">
+	import { onMount, onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import { Activity, ChevronDown, Plus, BrainCircuit, Download, Loader2 } from 'lucide-svelte';
+	import type { SensorData } from '$lib/types/index';
 
 	// --- State Management ---
+
 	let nodes = [
-		{ id: 'node-alpha', name: 'Alpha Pipeline - Sec 1A', location: 'North Field' },
+		{ id: '001', name: 'Pipeline Rungkut - Sec Kalirungkut', location: 'North Field' },
 		{ id: 'node-beta', name: 'Beta Pipeline - Sec 2B', location: 'East Valley' },
 		{ id: 'node-gamma', name: 'Gamma Station - Main', location: 'Central Hub' }
 	];
 
-	let selectedNodeId = nodes[0].id;
-	$: selectedNode = nodes.find((n) => n.id === selectedNodeId) || nodes[0];
+	let selectedNodeId = $state(nodes[0].id);
+	let selectedNode = $derived(nodes.find((n) => n.id === selectedNodeId) || nodes[0]);
+	let timespan = $state('24h');
+	let intervalID: any;
 
-	let timespan = '24h';
+	let canvas1, canvas2, canvas3, canvas4;
+	let charts: any[] = [];
 
-	let chartCanvas;
-	let chartInstance = null;
-	let isChartJsLoaded = false;
+	let isChartJsLoaded = $state(false);
 	let isAddingNode = false;
 
-	let isFetchingData = false;
+	let isFetchingData = $state(false);
+	let isInitialLoad = $state(true);
+
+	let data = $state<SensorData | null>(null);
 
 	// Reactively re-render chart whenever shadcn Tabs or Dropdown values change
-	$: if (isChartJsLoaded && (timespan || selectedNodeId)) {
-		renderChart();
-	}
+	$effect(() => {
+		// Create an internal async function so the effect itself stays sync
+		async function runUpdatePipeline() {
+			if (isChartJsLoaded && (timespan || selectedNodeId)) {
+				// 1. Line up the fetch and WAIT for it to finish successfully
+				await fetchRealData(timespan, selectedNodeId);
+
+				// 2. Only render the chart AFTER we know data is safely populated
+				renderChart();
+			}
+		}
+
+		runUpdatePipeline();
+	});
 
 	// --- Real Data Fetcher ---
 	async function fetchRealData(span, node) {
@@ -36,153 +53,340 @@
 			isFetchingData = true;
 			const response = await fetch(`/api/telemetry?timespan=${span}&node=${node}`);
 			if (!response.ok) throw new Error('Failed to fetch data');
-			const data = await response.json();
-			return data;
+
+			// Mutate your global reactive state here
+			data = await response.json();
+			console.log('update data');
 		} catch (error) {
 			console.error('Error fetching from API:', error);
-			// Return empty arrays so the chart doesn't crash on failure
-			return { labels: [], busV: [], busI: [], electrodeV: [], predictedV: [], humidity: [] };
+
+			// ✅ FIX: Instead of returning a value that gets ignored,
+			// explicitly reset your global state to empty arrays here so the chart doesn't break
+			data = {
+				labels: [],
+				busV: [],
+				busI: [],
+				busI: [],
+				electrodeV: [],
+				predictedV: [],
+				humidity: []
+			};
 		} finally {
 			isFetchingData = false;
+			isInitialLoad = false;
 		}
 	}
 
-	// --- Chart Rendering ---
 	async function renderChart() {
-		if (!isChartJsLoaded || !chartCanvas) return;
+		if (!isChartJsLoaded || !canvas1 || !canvas2 || !canvas3 || !canvas4) return;
 
-		// Fetch real data from our SvelteKit API
-		const data = await fetchRealData(timespan, selectedNodeId);
+		// 1. Take the complete snapshot immediately
+		const dataSnapshot = $state.snapshot(data);
 
-		if (chartInstance) {
-			chartInstance.destroy();
+		// If data isn't loaded yet or arrays are empty, exit safely
+		if (!dataSnapshot || !dataSnapshot.labels || dataSnapshot.labels.length === 0) return;
+
+		// 2. Calculate derived metrics using only the snapshot
+		const processed = {
+			...dataSnapshot,
+			resistance: [],
+			deviation: [],
+			TbusI: dataSnapshot.TbusI || []
+		};
+
+		for (let i = 0; i < dataSnapshot.labels.length; i++) {
+			// Fallback target current calculation if API doesn't provide one
+			if (processed.TbusI[i] === undefined) {
+				processed.TbusI[i] = dataSnapshot.busI[i] ? dataSnapshot.busI[i] * 0.95 : 12;
+			}
+
+			const v = dataSnapshot.busV[i] ?? 0;
+			const current = dataSnapshot.busI[i] ?? 0;
+
+			// R = V / I (Assumes busI is in mA, adjusts to A for Ohms Law)
+			processed.resistance[i] =
+				v !== null && current !== 0 ? +(v / (current / 1000)).toFixed(2) : null;
+
+			// Deviation = Current - Target
+			const t = processed.TbusI[i];
+			processed.deviation[i] = current !== null && t !== null ? +(current - t).toFixed(2) : null;
 		}
 
-		const ctx = chartCanvas.getContext('2d');
+		// 3. OPTIMIZATION: If charts already exist, update their data matrices smoothly instead of destroying them
+		if (charts.length === 4) {
+			// Chart 1 Update
+			charts[0].data.labels = dataSnapshot.labels;
+			charts[0].data.datasets[0].data = dataSnapshot.busV;
+			charts[0].data.datasets[1].data = dataSnapshot.busI;
+			charts[0].data.datasets[2].data = dataSnapshot.humidity;
+			charts[0].data.datasets[3].data = processed.resistance;
 
-		// @ts-ignore
-		chartInstance = new Chart(ctx, {
-			type: 'line',
-			data: {
-				labels: data.labels,
-				datasets: [
-					{
-						label: 'Bus Voltage (V)',
-						data: data.busV,
-						borderColor: '#eab308',
-						backgroundColor: 'rgba(234, 179, 8, 0.1)',
-						yAxisID: 'yVoltage',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					},
-					{
-						label: 'Bus Current (A)',
-						data: data.busI,
-						borderColor: '#ef4444',
-						backgroundColor: 'rgba(239, 68, 68, 0.1)',
-						yAxisID: 'yCurrent',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					},
-					{
-						label: 'Target Current (mA)',
-						data: data.TbusI,
-						borderColor: '#22c55e',
-						backgroundColor: 'rgba(34, 197, 94, 0.1)',
-						yAxisID: 'yCurrent',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					},
-					{
-						label: 'Electrode Voltage (V)',
-						data: data.electrodeV,
-						borderColor: '#3b82f6',
-						backgroundColor: 'rgba(59, 130, 246, 0.1)',
-						yAxisID: 'yElectrode',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					},
-					{
-						label: 'AI Predicted Electrode (V)',
-						data: data.predictedV,
-						borderColor: '#a855f7',
-						backgroundColor: 'rgba(168, 85, 247, 0.1)',
-						borderDash: [5, 5],
-						yAxisID: 'yElectrode',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					},
-					{
-						label: 'Soil Humidity (%)',
-						data: data.humidity,
-						borderColor: '#22c55e',
-						backgroundColor: 'rgba(34, 197, 94, 0.1)',
-						yAxisID: 'yHumidity',
-						tension: 0.4,
-						borderWidth: 2,
-						pointRadius: 0,
-						pointHitRadius: 10
-					}
-				]
+			// Chart 2 Update
+			charts[1].data.labels = dataSnapshot.labels;
+			charts[1].data.datasets[0].data = dataSnapshot.busI;
+			charts[1].data.datasets[1].data = processed.TbusI;
+			charts[1].data.datasets[2].data = processed.deviation;
+
+			// Chart 3 Update
+			charts[2].data.labels = dataSnapshot.labels;
+			charts[2].data.datasets[0].data = dataSnapshot.electrodeV;
+			charts[2].data.datasets[1].data = dataSnapshot.predictedV;
+
+			// Chart 4 Update
+			charts[3].data.labels = dataSnapshot.labels;
+			charts[3].data.datasets[0].data = dataSnapshot.busI;
+			charts[3].data.datasets[1].data = processed.TbusI;
+			charts[3].data.datasets[2].data = dataSnapshot.electrodeV;
+			charts[3].data.datasets[3].data = dataSnapshot.predictedV;
+
+			// Tell Chart.js to animate the new data points in seamlessly
+			charts.forEach((c) => c.update('none')); // Use 'none' or 'resize' to prevent jarring animation snaps
+			return;
+		}
+
+		// 4. FIRST RUN ONLY: If arrays are empty, build the charts for the first time
+		const commonOptions = {
+			responsive: true,
+			maintainAspectRatio: false,
+			interaction: { mode: 'index', intersect: false },
+			animation: { duration: 500 },
+			plugins: {
+				legend: {
+					position: 'top',
+					labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } }
+				},
+				tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', padding: 10, cornerRadius: 8 }
 			},
-			options: {
-				responsive: true,
-				maintainAspectRatio: false,
-				interaction: {
-					mode: 'index',
-					intersect: false
+			scales: { x: { display: false } }
+		};
+
+		// --- Chart 1: Bus V, Bus I, Soil Humidity, Resistance ---
+		// @ts-ignore
+		charts.push(
+			new Chart(canvas1.getContext('2d'), {
+				type: 'line',
+				data: {
+					labels: dataSnapshot.labels, // FIX: Snapshot
+					datasets: [
+						{
+							label: 'Voltage (V)',
+							data: dataSnapshot.busV,
+							borderColor: '#eab308',
+							yAxisID: 'yV',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'Current (mA)',
+							data: dataSnapshot.busI,
+							borderColor: '#ef4444',
+							yAxisID: 'yI',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'Humidity (%)',
+							data: dataSnapshot.humidity,
+							borderColor: '#22c55e',
+							yAxisID: 'yH',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0,
+							borderDash: [5, 5]
+						},
+						{
+							label: 'Resistance (Ω)',
+							data: processed.resistance,
+							borderColor: '#64748b',
+							yAxisID: 'yR',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						}
+					]
 				},
-				// Adding a gentle animation for when data loads from DB
-				animation: { duration: 500 },
-				plugins: {
-					legend: { position: 'top', labels: { usePointStyle: true, boxWidth: 8 } },
-					tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', padding: 10, cornerRadius: 8 }
-				},
-				scales: {
-					x: { grid: { display: false } },
-					yVoltage: {
-						type: 'linear',
-						display: true,
-						position: 'left',
-						title: { display: true, text: 'Bus Voltage (V)', color: '#eab308' },
-						grid: { color: 'rgba(0,0,0,0.04)' }
-					},
-					yCurrent: {
-						type: 'linear',
-						display: true,
-						position: 'right',
-						title: { display: true, text: 'Bus Current (A)', color: '#ef4444' },
-						grid: { drawOnChartArea: false }
-					},
-					yElectrode: {
-						type: 'linear',
-						display: true,
-						position: 'left',
-						title: { display: true, text: 'Electrode (V)', color: '#3b82f6' },
-						grid: { drawOnChartArea: false }
-					},
-					yHumidity: {
-						type: 'linear',
-						display: true,
-						position: 'right',
-						title: { display: true, text: 'Humidity (%)', color: '#22c55e' },
-						grid: { drawOnChartArea: false },
-						min: 0,
-						max: 3
+				options: {
+					...commonOptions,
+					scales: {
+						x: { display: false },
+						yV: { type: 'linear', position: 'left', title: { display: true, text: 'Voltage (V)' } },
+						yI: {
+							type: 'linear',
+							position: 'right',
+							grid: { drawOnChartArea: false },
+							title: { display: true, text: 'Current (mA)' }
+						},
+						yH: { display: false },
+						yR: { display: false }
 					}
 				}
-			}
-		});
+			})
+		);
+
+		// --- Chart 2: Bus Current, Target Current, Deviation ---
+		// @ts-ignore
+		charts.push(
+			new Chart(canvas2.getContext('2d'), {
+				type: 'line',
+				data: {
+					labels: dataSnapshot.labels, // FIX: Snapshot
+					datasets: [
+						{
+							label: 'Current (mA)',
+							data: dataSnapshot.busI,
+							borderColor: '#ef4444',
+							yAxisID: 'yI',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'Target (mA)',
+							data: processed.TbusI,
+							borderColor: '#3b82f6',
+							yAxisID: 'yI',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0,
+							borderDash: [5, 5]
+						},
+						{
+							type: 'bar',
+							label: 'Deviation (mA)',
+							data: processed.deviation,
+							backgroundColor: 'rgba(239, 68, 68, 0.2)',
+							yAxisID: 'yD'
+						}
+					]
+				},
+				options: {
+					...commonOptions,
+					scales: {
+						x: { display: false },
+						yI: { type: 'linear', position: 'left', title: { display: true, text: 'mA' } },
+						yD: {
+							type: 'linear',
+							position: 'right',
+							grid: { drawOnChartArea: false },
+							title: { display: true, text: 'Deviation' }
+						}
+					}
+				}
+			})
+		);
+
+		// --- Chart 3: Electrode V & AI Predicted V ---
+		// @ts-ignore
+		charts.push(
+			new Chart(canvas3.getContext('2d'), {
+				type: 'line',
+				data: {
+					labels: dataSnapshot.labels, // FIX: Snapshot
+					datasets: [
+						{
+							label: 'Electrode (V)',
+							data: dataSnapshot.electrodeV,
+							borderColor: '#3b82f6',
+							yAxisID: 'yE',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'AI Predicted (V)',
+							data: dataSnapshot.predictedV,
+							borderColor: '#a855f7',
+							yAxisID: 'yE',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0,
+							borderDash: [5, 5]
+						}
+					]
+				},
+				options: {
+					...commonOptions,
+					scales: {
+						x: { display: false },
+						yE: {
+							type: 'linear',
+							position: 'left',
+							title: { display: true, text: 'Electrode (V)' }
+						}
+					}
+				}
+			})
+		);
+
+		// --- Chart 4: Current, Target, Electrode, Predicted ---
+		// @ts-ignore
+		charts.push(
+			new Chart(canvas4.getContext('2d'), {
+				type: 'line',
+				data: {
+					labels: dataSnapshot.labels, // FIX: Snapshot
+					datasets: [
+						{
+							label: 'Current (mA)',
+							data: dataSnapshot.busI,
+							borderColor: '#ef4444',
+							yAxisID: 'yI',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'Target (mA)',
+							data: processed.TbusI,
+							borderColor: '#f97316',
+							yAxisID: 'yI',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0,
+							borderDash: [5, 5]
+						},
+						{
+							label: 'Electrode (V)',
+							data: dataSnapshot.electrodeV,
+							borderColor: '#3b82f6',
+							yAxisID: 'yE',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0
+						},
+						{
+							label: 'Predicted (V)',
+							data: dataSnapshot.predictedV,
+							borderColor: '#a855f7',
+							yAxisID: 'yE',
+							tension: 0.4,
+							borderWidth: 2,
+							pointRadius: 0,
+							borderDash: [5, 5]
+						}
+					]
+				},
+				options: {
+					...commonOptions,
+					scales: {
+						x: { display: false },
+						yI: {
+							type: 'linear',
+							position: 'left',
+							title: { display: true, text: 'Current (mA)' }
+						},
+						yE: {
+							type: 'linear',
+							position: 'right',
+							grid: { drawOnChartArea: false },
+							title: { display: true, text: 'Electrode' }
+						}
+					}
+				}
+			})
+		);
 	}
 
 	onMount(() => {
@@ -193,11 +397,17 @@
 			// The reactive statement $: if(isChartJsLoaded) will handle the initial render now
 		};
 		document.head.appendChild(script);
+		fetchRealData(timespan, selectedNodeId);
+		intervalID = setInterval(fetchRealData, 5000);
 
 		return () => {
-			if (chartInstance) chartInstance.destroy();
+			charts.forEach((c) => c.destroy());
 			if (document.head.contains(script)) document.head.removeChild(script);
 		};
+	});
+
+	onDestroy(() => {
+		clearInterval(intervalID);
 	});
 
 	function handleAddNode() {
@@ -304,7 +514,8 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						24.1 <span class="text-sm font-normal text-muted-foreground">V</span>
+						{data?.busV?.[0]?.toFixed(2) ?? 'N/A'}
+						<span class="text-sm font-normal text-muted-foreground">V</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
@@ -318,7 +529,8 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						12.4 <span class="text-sm font-normal text-muted-foreground">A</span>
+						{data?.busI?.[0]?.toFixed(2) ?? 'N/A'}
+						<span class="text-sm font-normal text-muted-foreground">A</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
@@ -332,7 +544,8 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						-0.92 <span class="text-sm font-normal text-muted-foreground">V</span>
+						{data?.electrodeV?.[0]?.toFixed(2) ?? 'N/A'}
+						<span class="text-sm font-normal text-muted-foreground">V</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
@@ -352,37 +565,70 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						-0.94 <span class="text-sm font-normal text-purple-200">V (Forecast)</span>
+						{data?.predictedV?.[0]?.toFixed(2) ?? 'N/A'}
+						<span class="text-sm font-normal text-purple-200">V (Forecast)</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
 		</div>
 
-		<!-- STREAMING_CHUNK:Chart Card Container -->
-		<Card.Root>
-			<Card.Header class="flex flex-row items-center justify-between pb-2">
-				<Card.Title class="text-lg">Telemetry & AI Pipeline Health</Card.Title>
-				<Button variant="ghost" size="icon" title="Export Data">
-					<Download class="h-5 w-5 text-muted-foreground" />
-				</Button>
-			</Card.Header>
-			<Card.Content>
-				<div class="relative mt-4 h-[450px] w-full">
-					{#if !isChartJsLoaded || isFetchingData}
-						<div
-							class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-background/80 backdrop-blur-sm transition-all"
-						>
-							<div class="flex flex-col items-center text-muted-foreground">
-								<Loader2 class="mb-4 h-8 w-8 animate-spin text-primary" />
-								<span class="text-sm font-medium">
-									{!isChartJsLoaded ? 'Initializing Charting Engine...' : 'Fetching Live Data...'}
-								</span>
-							</div>
-						</div>
-					{/if}
-					<canvas bind:this={chartCanvas}></canvas>
+		<div class="relative">
+			{#if !isChartJsLoaded || isInitialLoad}
+				<div
+					class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-background/80 backdrop-blur-sm transition-all"
+				>
+					<div class="flex flex-col items-center text-muted-foreground">
+						<Loader2 class="mb-4 h-8 w-8 animate-spin text-primary" />
+						<span class="text-sm font-medium">
+							{!isChartJsLoaded ? 'Initializing Charting Engine...' : 'Fetching Live Data...'}
+						</span>
+					</div>
 				</div>
-			</Card.Content>
-		</Card.Root>
+			{/if}
+
+			<div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+				<!-- Chart 1 -->
+				<Card.Root class="flex flex-col">
+					<Card.Header class="flex flex-row items-center justify-between pb-2">
+						<Card.Title class="text-sm font-medium">Power & Environmental Constraints</Card.Title>
+					</Card.Header>
+					<Card.Content class="relative h-[300px] flex-1">
+						<canvas bind:this={canvas1}></canvas>
+					</Card.Content>
+				</Card.Root>
+
+				<!-- Chart 2 -->
+				<Card.Root class="flex flex-col">
+					<Card.Header class="flex flex-row items-center justify-between pb-2">
+						<Card.Title class="text-sm font-medium">Target Current Tracking & Deviation</Card.Title>
+					</Card.Header>
+					<Card.Content class="relative h-[300px] flex-1">
+						<canvas bind:this={canvas2}></canvas>
+					</Card.Content>
+				</Card.Root>
+
+				<!-- Chart 3 -->
+				<Card.Root class="flex flex-col">
+					<Card.Header class="flex flex-row items-center justify-between pb-2">
+						<Card.Title class="text-sm font-medium">AI Electrode Prediction Accuracy</Card.Title>
+					</Card.Header>
+					<Card.Content class="relative h-[300px] flex-1">
+						<canvas bind:this={canvas3}></canvas>
+					</Card.Content>
+				</Card.Root>
+
+				<!-- Chart 4 -->
+				<Card.Root class="flex flex-col">
+					<Card.Header class="flex flex-row items-center justify-between pb-2">
+						<Card.Title class="text-sm font-medium"
+							>System Overview (Current & Potential)</Card.Title
+						>
+					</Card.Header>
+					<Card.Content class="relative h-[300px] flex-1">
+						<canvas bind:this={canvas4}></canvas>
+					</Card.Content>
+				</Card.Root>
+			</div>
+		</div>
 	</main>
 </div>
