@@ -25,7 +25,8 @@ export const GET: RequestHandler = async ({ url }) => {
 
   // Map the UI timespans to InfluxDB time ranges and aggregation windows
   const timeConfig: Record<string, TimeConfig> = {
-    '1h': { range: '-1h', window: '1m' },
+    '15m': { range: '-15m', window: '30s' },
+    '1h': { range: '-1h', window: '2m' },
     '24h': { range: '-24h', window: '30m' },
     '7d': { range: '-7d', window: '3h' },
     '30d': { range: '-30d', window: '12h' }
@@ -80,9 +81,33 @@ export const GET: RequestHandler = async ({ url }) => {
     // Format labels for the frontend
     sortedTimes.forEach(timeString => {
       const d = new Date(timeString);
-      const label = timespan.includes('h')
-        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      let label = "";
+
+      // 1. If looking at a span of days/weeks, show Date + Time
+      if (timespan.includes('d') || timespan.includes('w')) {
+        label = d.toLocaleString([], {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      }
+      // 2. If your window is in seconds ('30s'), you need seconds on the label!
+      else if (config.window.includes('s')) {
+        label = d.toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+      }
+      // 3. Default for hours ('-1h', '-15h') with standard windows
+      else {
+        label = d.toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      }
+
       labels.push(label);
     });
 

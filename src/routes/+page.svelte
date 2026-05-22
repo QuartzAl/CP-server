@@ -4,7 +4,15 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Tabs from '$lib/components/ui/tabs';
-	import { Activity, ChevronDown, Plus, BrainCircuit, Download, Loader2 } from 'lucide-svelte';
+	import {
+		Activity,
+		ChevronDown,
+		Plus,
+		BrainCircuit,
+		Download,
+		Loader2,
+		Send
+	} from 'lucide-svelte';
 	import type { SensorData } from '$lib/types/index';
 
 	// --- State Management ---
@@ -17,7 +25,7 @@
 
 	let selectedNodeId = $state(nodes[0].id);
 	let selectedNode = $derived(nodes.find((n) => n.id === selectedNodeId) || nodes[0]);
-	let timespan = $state('24h');
+	let timespan = $state('1h');
 	let intervalID: any;
 
 	let canvas1, canvas2, canvas3, canvas4;
@@ -30,6 +38,52 @@
 	let isInitialLoad = $state(true);
 
 	let data = $state<SensorData | null>(null);
+
+	let targetCurrentInput = $state<number | ''>('');
+	let isSendingCommand = $state(false);
+	let commandStatus = $state<{ text: string; type: 'success' | 'error' | '' }>({
+		text: '',
+		type: ''
+	});
+
+	async function handleSetTargetCurrent() {
+		if (targetCurrentInput === '' || targetCurrentInput < 0) {
+			commandStatus = { text: 'Please enter a valid positive number.', type: 'error' };
+			return;
+		}
+
+		isSendingCommand = true;
+		commandStatus = { text: '', type: '' };
+
+		try {
+			const res = await fetch('/api/command', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					nodeId: selectedNodeId,
+					value: Number(targetCurrentInput)
+				})
+			});
+
+			const resultData = await res.json();
+			if (resultData.success) {
+				commandStatus = { text: `Target set to ${targetCurrentInput} mA.`, type: 'success' };
+				targetCurrentInput = ''; // Clear input on success
+
+				// Auto-clear the success message after 5 seconds
+				setTimeout(() => {
+					commandStatus = { text: '', type: '' };
+				}, 5000);
+			} else {
+				commandStatus = { text: `Error: ${resultData.error}`, type: 'error' };
+			}
+		} catch (err) {
+			console.error('Command sending failed:', err);
+			commandStatus = { text: 'Failed to communicate with server.', type: 'error' };
+		} finally {
+			isSendingCommand = false;
+		}
+	}
 
 	// Reactively re-render chart whenever shadcn Tabs or Dropdown values change
 	$effect(() => {
@@ -56,17 +110,15 @@
 
 			// Mutate your global reactive state here
 			data = await response.json();
-			console.log('update data');
+			console.log(`update data: time range ${span} and node ${node}`);
 		} catch (error) {
 			console.error('Error fetching from API:', error);
 
-			// ✅ FIX: Instead of returning a value that gets ignored,
-			// explicitly reset your global state to empty arrays here so the chart doesn't break
 			data = {
 				labels: [],
 				busV: [],
 				busI: [],
-				busI: [],
+				TbusI: [],
 				electrodeV: [],
 				predictedV: [],
 				humidity: []
@@ -74,6 +126,7 @@
 		} finally {
 			isFetchingData = false;
 			isInitialLoad = false;
+			renderChart();
 		}
 	}
 
@@ -82,6 +135,7 @@
 
 		// 1. Take the complete snapshot immediately
 		const dataSnapshot = $state.snapshot(data);
+		console.log(dataSnapshot);
 
 		// If data isn't loaded yet or arrays are empty, exit safely
 		if (!dataSnapshot || !dataSnapshot.labels || dataSnapshot.labels.length === 0) return;
@@ -140,7 +194,7 @@
 			charts[3].data.datasets[3].data = dataSnapshot.predictedV;
 
 			// Tell Chart.js to animate the new data points in seamlessly
-			charts.forEach((c) => c.update('none')); // Use 'none' or 'resize' to prevent jarring animation snaps
+			charts.forEach((c) => c.update()); // Use 'none' or 'resize' to prevent jarring animation snaps
 			return;
 		}
 
@@ -166,7 +220,7 @@
 			new Chart(canvas1.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels, // FIX: Snapshot
+					labels: dataSnapshot.labels,
 					datasets: [
 						{
 							label: 'Voltage (V)',
@@ -231,7 +285,7 @@
 			new Chart(canvas2.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels, // FIX: Snapshot
+					labels: dataSnapshot.labels,
 					datasets: [
 						{
 							label: 'Current (mA)',
@@ -283,7 +337,7 @@
 			new Chart(canvas3.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels, // FIX: Snapshot
+					labels: dataSnapshot.labels,
 					datasets: [
 						{
 							label: 'Electrode (V)',
@@ -326,7 +380,7 @@
 			new Chart(canvas4.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels, // FIX: Snapshot
+					labels: dataSnapshot.labels,
 					datasets: [
 						{
 							label: 'Current (mA)',
@@ -397,8 +451,10 @@
 			// The reactive statement $: if(isChartJsLoaded) will handle the initial render now
 		};
 		document.head.appendChild(script);
-		fetchRealData(timespan, selectedNodeId);
-		intervalID = setInterval(fetchRealData, 5000);
+		// fetchRealData(timespan, selectedNodeId);
+		intervalID = setInterval(function () {
+			fetchRealData(timespan, selectedNodeId);
+		}, 5000);
 
 		return () => {
 			charts.forEach((c) => c.destroy());
@@ -494,7 +550,8 @@
 
 			<!-- Timespan Selector (shadcn Tabs) -->
 			<Tabs.Root bind:value={timespan} class="w-full sm:w-[300px]">
-				<Tabs.List class="grid w-full grid-cols-4">
+				<Tabs.List class="grid w-full grid-cols-5">
+					<Tabs.Trigger value="15m">15m</Tabs.Trigger>
 					<Tabs.Trigger value="1h">1H</Tabs.Trigger>
 					<Tabs.Trigger value="24h">24H</Tabs.Trigger>
 					<Tabs.Trigger value="7d">7D</Tabs.Trigger>
@@ -502,6 +559,53 @@
 				</Tabs.List>
 			</Tabs.Root>
 		</div>
+
+		<Card.Root class="border-dashed bg-muted/30 shadow-sm">
+			<Card.Content class="flex flex-col justify-between gap-4 p-4 sm:flex-row sm:items-center">
+				<div>
+					<h3 class="flex items-center gap-2 text-sm font-semibold">
+						<Send class="h-4 w-4 text-primary" />
+						Target Current Override
+					</h3>
+					<p class="mt-1 text-xs text-muted-foreground">
+						Manually set the target current (mA) for {selectedNode.name}
+					</p>
+				</div>
+				<div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+					{#if commandStatus.text}
+						<span
+							class="text-xs font-medium {commandStatus.type === 'error'
+								? 'text-destructive'
+								: 'text-green-600 dark:text-green-400'}"
+						>
+							{commandStatus.text}
+						</span>
+					{/if}
+					<div class="flex items-center gap-2">
+						<input
+							type="number"
+							bind:value={targetCurrentInput}
+							placeholder="e.g. 1200"
+							class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-[150px]"
+							min="0"
+							max="10000"
+						/>
+						<Button
+							size="sm"
+							onclick={handleSetTargetCurrent}
+							disabled={isSendingCommand || targetCurrentInput === ''}
+						>
+							{#if isSendingCommand}
+								<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+								Sending
+							{:else}
+								Set Target
+							{/if}
+						</Button>
+					</div>
+				</div>
+			</Card.Content>
+		</Card.Root>
 
 		<!-- STREAMING_CHUNK:System Status Cards -->
 		<div class="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -530,7 +634,7 @@
 				<Card.Content>
 					<div class="text-2xl font-bold">
 						{data?.busI?.[0]?.toFixed(2) ?? 'N/A'}
-						<span class="text-sm font-normal text-muted-foreground">A</span>
+						<span class="text-sm font-normal text-muted-foreground">mA</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
