@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
@@ -10,11 +12,25 @@
 		Plus,
 		BrainCircuit,
 		Download,
-		Loader2,
+		LoaderCircle,
 		Send
 	} from 'lucide-svelte';
 	import type { SensorData } from '$lib/types/index';
+	import { authClient } from '$lib/auth-client';
 
+	async function signOut() {
+		await authClient.signOut({
+			fetchOptions: {
+				onSuccess: () => {
+					goto('/login'); // redirect to login page
+				}
+			}
+		});
+	}
+
+	async function adminPanel() {
+		await goto('/admin');
+	}
 	// --- State Management ---
 
 	let nodes = [
@@ -180,6 +196,22 @@
 			charts[1].data.datasets[0].data = dataSnapshot.busI;
 			charts[1].data.datasets[1].data = processed.TbusI;
 			charts[1].data.datasets[2].data = processed.deviation;
+			// calculate the location of min max for the deviation scale
+			const targetMean = processed.TbusI.reduce((a, b) => a + b, 0) / processed.TbusI.length;
+			const targetMin = Math.min(...processed.busI);
+			const targetMax = Math.max(...processed.busI);
+			const devMin = Math.min(...processed.deviation);
+			const devMax = Math.max(...processed.deviation);
+
+			const ratio = (targetMean - targetMin) / (targetMax - targetMin);
+			if (ratio <= 0 || ratio >= 1) {
+				console.warn('Target is outside primary axis bounds.');
+			}
+			const cMax = devMax > 0 ? devMax / (1 - ratio) : 0;
+			const cMin = devMin < 0 ? Math.abs(devMin) / ratio : 0;
+			const C = Math.max(cMax, cMin);
+			charts[1].min = -(C * ratio);
+			charts[1].max = C * (1 - ratio);
 
 			// Chart 3 Update
 			charts[2].data.labels = dataSnapshot.labels;
@@ -312,6 +344,8 @@
 							data: processed.deviation,
 							backgroundColor: 'rgba(239, 68, 68, 0.2)',
 							yAxisID: 'yD'
+							// max: charts[1].max,
+							// min: charts[1].min
 						}
 					]
 				},
@@ -324,7 +358,9 @@
 							type: 'linear',
 							position: 'right',
 							grid: { drawOnChartArea: false },
-							title: { display: true, text: 'Deviation' }
+							title: { display: true, text: 'Deviation' },
+							suggestedMin: -2,
+							suggestedMax: 2
 						}
 					}
 				}
@@ -492,42 +528,49 @@
 			</div>
 
 			<!-- Node Selection Dropdown (shadcn) -->
-			<DropdownMenu.Root>
-				<DropdownMenu.Trigger asChild>
-					{#snippet child({ props })}
-						<Button {...props} variant="outline" class="gap-2 rounded-full">
-							<span class="max-w-[150px] truncate sm:max-w-xs">{selectedNode.name}</span>
-							<ChevronDown class="h-4 w-4 text-muted-foreground" />
-						</Button>
-					{/snippet}
-				</DropdownMenu.Trigger>
-				<DropdownMenu.Content align="end" class="w-64">
-					<DropdownMenu.Label
-						class="text-xs font-semibold tracking-wider text-muted-foreground uppercase"
-						>Active Nodes</DropdownMenu.Label
-					>
-					<DropdownMenu.Separator />
-					<!-- RadioGroup binds directly to our selectedNodeId state -->
-					<DropdownMenu.RadioGroup bind:value={selectedNodeId}>
-						{#each nodes as node}
-							<DropdownMenu.RadioItem value={node.id} class="cursor-pointer">
-								<div class="flex w-full flex-col">
-									<span>{node.name}</span>
-									<span class="text-xs text-muted-foreground">{node.location}</span>
-								</div>
-							</DropdownMenu.RadioItem>
-						{/each}
-					</DropdownMenu.RadioGroup>
-					<DropdownMenu.Separator />
-					<DropdownMenu.Item
-						class="cursor-pointer font-medium text-primary"
-						on:click={handleAddNode}
-					>
-						<Plus class="mr-2 h-4 w-4" />
-						Add New Node...
-					</DropdownMenu.Item>
-				</DropdownMenu.Content>
-			</DropdownMenu.Root>
+			<div>
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger asChild>
+						{#snippet child({ props })}
+							<Button {...props} variant="outline" class="gap-2 rounded-full">
+								<span class="max-w-[150px] truncate sm:max-w-xs">{selectedNode.name}</span>
+								<ChevronDown class="h-4 w-4 text-muted-foreground" />
+							</Button>
+						{/snippet}
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="end" class="w-64">
+						<DropdownMenu.Label
+							class="text-xs font-semibold tracking-wider text-muted-foreground uppercase"
+							>Active Nodes</DropdownMenu.Label
+						>
+						<DropdownMenu.Separator />
+						<!-- RadioGroup binds directly to our selectedNodeId state -->
+						<DropdownMenu.RadioGroup bind:value={selectedNodeId}>
+							{#each nodes as node}
+								<DropdownMenu.RadioItem value={node.id} class="cursor-pointer">
+									<div class="flex w-full flex-col">
+										<span>{node.name}</span>
+										<span class="text-xs text-muted-foreground">{node.location}</span>
+									</div>
+								</DropdownMenu.RadioItem>
+							{/each}
+						</DropdownMenu.RadioGroup>
+						<DropdownMenu.Separator />
+						<DropdownMenu.Item
+							class="cursor-pointer font-medium text-primary"
+							on:click={handleAddNode}
+						>
+							<Plus class="mr-2 h-4 w-4" />
+							Add New Node...
+						</DropdownMenu.Item>
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+
+				{#if page.data.user.role === 'admin'}
+					<Button variant="ghost" onclick={adminPanel}>Admin Panel</Button>
+				{/if}
+				<Button variant="ghost" onclick={signOut}>Sign Out</Button>
+			</div>
 		</div>
 	</header>
 
@@ -596,7 +639,7 @@
 							disabled={isSendingCommand || targetCurrentInput === ''}
 						>
 							{#if isSendingCommand}
-								<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+								<LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
 								Sending
 							{:else}
 								Set Target
@@ -618,7 +661,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.busV?.[0]?.toFixed(2) ?? 'N/A'}
+						{data?.busV?.at(-1)?.toFixed(2) ?? 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">V</span>
 					</div>
 				</Card.Content>
@@ -633,7 +676,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.busI?.[0]?.toFixed(2) ?? 'N/A'}
+						{data?.busI?.at(-1)?.toFixed(2) ?? 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">mA</span>
 					</div>
 				</Card.Content>
@@ -648,7 +691,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.electrodeV?.[0]?.toFixed(2) ?? 'N/A'}
+						{data?.electrodeV?.at(-1)?.toFixed(2) ?? 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">V</span>
 					</div>
 				</Card.Content>
@@ -669,7 +712,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.predictedV?.[0]?.toFixed(2) ?? 'N/A'}
+						{data?.predictedV?.at(-1)?.toFixed(2) ?? 'N/A'}
 						<span class="text-sm font-normal text-purple-200">V (Forecast)</span>
 					</div>
 				</Card.Content>
@@ -682,7 +725,7 @@
 					class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-background/80 backdrop-blur-sm transition-all"
 				>
 					<div class="flex flex-col items-center text-muted-foreground">
-						<Loader2 class="mb-4 h-8 w-8 animate-spin text-primary" />
+						<LoaderCircle class="mb-4 h-8 w-8 animate-spin text-primary" />
 						<span class="text-sm font-medium">
 							{!isChartJsLoaded ? 'Initializing Charting Engine...' : 'Fetching Live Data...'}
 						</span>
