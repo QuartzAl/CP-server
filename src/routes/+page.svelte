@@ -507,8 +507,6 @@
 	});
 </script>
 
-<pre>{JSON.stringify(selectedNodeId, null, 2)}</pre>
-
 <div class="min-h-screen bg-background font-sans text-foreground">
 	<!-- STREAMING_CHUNK:Header & Navigation -->
 	<header class="sticky top-0 z-30 border-b bg-background shadow-sm">
