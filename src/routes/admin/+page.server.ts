@@ -23,6 +23,14 @@ export const actions: Actions = {
     if (!email) return fail(400, { error: 'Email is required' });
     const generatedPassword = crypto.randomUUID().slice(0, 12);
 
+    const existingUser = await prisma.user.findUnique({
+      where: { email: email.toLowerCase() }
+    });
+
+    if (existingUser) {
+      return fail(400, { error: 'A user with this email already exists.' });
+    }
+
     try {
       await auth.api.signUpEmail({
         body: {

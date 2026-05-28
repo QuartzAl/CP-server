@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import type { PageData } from './$types';
 	import { onMount, onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
@@ -31,24 +32,24 @@
 	async function adminPanel() {
 		await goto('/admin');
 	}
+	async function handleAddNode() {
+		await goto('/node');
+	}
 	// --- State Management ---
 
-	let nodes = [
-		{ id: '001', name: 'Pipeline Rungkut - Sec Kalirungkut', location: 'North Field' },
-		{ id: 'node-beta', name: 'Beta Pipeline - Sec 2B', location: 'East Valley' },
-		{ id: 'node-gamma', name: 'Gamma Station - Main', location: 'Central Hub' }
-	];
-
-	let selectedNodeId = $state(nodes[0].id);
-	let selectedNode = $derived(nodes.find((n) => n.id === selectedNodeId) || nodes[0]);
+	let serverData = $props<{ data: PageData }>();
+	//
+	let selectedNodeId = $state('');
+	let selectedNode = $derived(
+		serverData?.data?.nodes?.find((n) => n.id === selectedNodeId) ?? data?.nodes?.[0]
+	);
+	let selectedNodeName = $derived(selectedNode?.name ?? 'N/A');
 	let timespan = $state('1h');
 	let intervalID: any;
 
 	let canvas1, canvas2, canvas3, canvas4;
 	let charts: any[] = [];
-
 	let isChartJsLoaded = $state(false);
-	let isAddingNode = false;
 
 	let isFetchingData = $state(false);
 	let isInitialLoad = $state(true);
@@ -76,7 +77,7 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					nodeId: selectedNodeId,
+					// nodeId: selectedNodeId,
 					value: Number(targetCurrentInput)
 				})
 			});
@@ -103,6 +104,9 @@
 
 	// Reactively re-render chart whenever shadcn Tabs or Dropdown values change
 	$effect(() => {
+		if (serverData?.data?.nodes?.length && !selectedNodeId) {
+			selectedNodeId = serverData.data.nodes[0].id;
+		}
 		// Create an internal async function so the effect itself stays sync
 		async function runUpdatePipeline() {
 			if (isChartJsLoaded && (timespan || selectedNodeId)) {
@@ -501,15 +505,9 @@
 	onDestroy(() => {
 		clearInterval(intervalID);
 	});
-
-	function handleAddNode() {
-		isAddingNode = true;
-		setTimeout(() => {
-			alert("This action would trigger the 'Add New ICCP Node' configuration modal or page.");
-			isAddingNode = false;
-		}, 100);
-	}
 </script>
+
+<pre>{JSON.stringify(selectedNodeId, null, 2)}</pre>
 
 <div class="min-h-screen bg-background font-sans text-foreground">
 	<!-- STREAMING_CHUNK:Header & Navigation -->
@@ -530,10 +528,10 @@
 			<!-- Node Selection Dropdown (shadcn) -->
 			<div>
 				<DropdownMenu.Root>
-					<DropdownMenu.Trigger asChild>
+					<DropdownMenu.Trigger>
 						{#snippet child({ props })}
 							<Button {...props} variant="outline" class="gap-2 rounded-full">
-								<span class="max-w-[150px] truncate sm:max-w-xs">{selectedNode.name}</span>
+								<span class="max-w-[150px] truncate sm:max-w-xs">{selectedNodeName}</span>
 								<ChevronDown class="h-4 w-4 text-muted-foreground" />
 							</Button>
 						{/snippet}
@@ -546,11 +544,11 @@
 						<DropdownMenu.Separator />
 						<!-- RadioGroup binds directly to our selectedNodeId state -->
 						<DropdownMenu.RadioGroup bind:value={selectedNodeId}>
-							{#each nodes as node}
+							{#each serverData?.data?.nodes as node}
 								<DropdownMenu.RadioItem value={node.id} class="cursor-pointer">
 									<div class="flex w-full flex-col">
 										<span>{node.name}</span>
-										<span class="text-xs text-muted-foreground">{node.location}</span>
+										<span class="text-xs text-muted-foreground">{node.description}</span>
 									</div>
 								</DropdownMenu.RadioItem>
 							{/each}
@@ -558,7 +556,7 @@
 						<DropdownMenu.Separator />
 						<DropdownMenu.Item
 							class="cursor-pointer font-medium text-primary"
-							on:click={handleAddNode}
+							onclick={handleAddNode}
 						>
 							<Plus class="mr-2 h-4 w-4" />
 							Add New Node...
@@ -579,7 +577,7 @@
 		<!-- Header & Timespan Controls -->
 		<div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
 			<div>
-				<h2 class="text-2xl font-bold">{selectedNode.name}</h2>
+				<h2 class="text-2xl font-bold">{selectedNodeName}</h2>
 				<p class="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
 					<span class="relative flex h-2 w-2">
 						<span
@@ -587,8 +585,13 @@
 						></span>
 						<span class="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span>
 					</span>
-					Live Data Monitoring • {selectedNode.location}
+					Live Data Monitoring
 				</p>
+				{#if selectedNode?.description !== undefined}
+					<p class="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+						{selectedNode.description}
+					</p>
+				{/if}
 			</div>
 
 			<!-- Timespan Selector (shadcn Tabs) -->
@@ -611,7 +614,7 @@
 						Target Current Override
 					</h3>
 					<p class="mt-1 text-xs text-muted-foreground">
-						Manually set the target current (mA) for {selectedNode.name}
+						Manually set the target current (mA) for {selectedNodeName}
 					</p>
 				</div>
 				<div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center">

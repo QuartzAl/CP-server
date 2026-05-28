@@ -22,43 +22,6 @@
 	export let form: ActionData;
 	let loading = false;
 
-	async function handleRoleChange(userId: string, newRole: string) {
-		// DEBUG 1: Did the dropdown actually detect the click?
-		console.log('1. Dropdown changed! User:', userId, 'New Role:', newRole);
-
-		const formData = new FormData();
-		formData.append('userId', userId);
-		formData.append('role', newRole);
-
-		try {
-			console.log('2. Sending fetch request to server...');
-
-			const response = await fetch('?/changeRole', {
-				method: 'POST',
-				body: formData,
-				headers: {
-					// THIS IS MANDATORY FOR SVELTEKIT ACTIONS!
-					'x-sveltekit-action': 'true'
-				}
-			});
-
-			// DEBUG 2: Did the server respond?
-			console.log('3. Server responded with status:', response.status);
-
-			const result = deserialize(await response.text());
-			console.log('4. Parsed SvelteKit Result:', result);
-
-			if (result.type === 'success') {
-				toast.success('User role updated successfully.');
-				await invalidateAll();
-			} else if (result.type === 'failure') {
-				toast.error(result.data?.error || 'Failed to update role.');
-			}
-		} catch (error) {
-			console.error('Fetch completely failed:', error);
-			toast.error('A network error occurred.');
-		}
-	}
 	// Helper for copying password to clipboard
 	let copied = false;
 	function copyPassword(password: string) {

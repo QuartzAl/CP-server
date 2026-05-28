@@ -8,7 +8,7 @@ datasource db {
   provider = "postgresql"
 }
 
-model nodes {
+model Nodes {
   id          String   @id
   name        String
   description String?

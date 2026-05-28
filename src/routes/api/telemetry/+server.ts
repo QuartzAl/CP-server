@@ -21,7 +21,8 @@ interface InfluxRow {
 
 export const GET: RequestHandler = async ({ url }) => {
   const timespan = url.searchParams.get('timespan') || '24h';
-  // const nodeId = url.searchParams.get('node') || '001';
+  const nodeId = url.searchParams.get('node') || '001';
+  console.log(`MQTT API: timespan ${timespan}, node ${nodeId}`)
 
   // Map the UI timespans to InfluxDB time ranges and aggregation windows
   const timeConfig: Record<string, TimeConfig> = {
@@ -45,6 +46,7 @@ export const GET: RequestHandler = async ({ url }) => {
   const fluxQuery = `
         from(bucket:"${env.INFLUX_BUCKET}")
             |> range(start: ${config.range})
+            |> filter(fn: (r) => r.device_id == "${nodeId}")
             |> filter(fn: (r) => r._field == "bus_voltage_V" or r._field == "current_mA" or r._field == "electrode_V" or r._field == "soil_humidity_V" or r._field == "target_current_mA")
             |> aggregateWindow(every: ${config.window}, fn: mean, createEmpty: false)
             |> yield(name: "mean")
@@ -75,10 +77,7 @@ export const GET: RequestHandler = async ({ url }) => {
       timeSet.add(o._time);
     }
 
-    // Sort timestamps chronologically
     const sortedTimes = Array.from(timeSet).sort();
-
-    // Format labels for the frontend
     sortedTimes.forEach(timeString => {
       const d = new Date(timeString);
       let label = "";
