@@ -18,7 +18,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 
   // RULE 1: Any user not logged in must be redirected to the login page.
   // (We skip this check if they are already on the login page to avoid infinite loops)
-  if (!user && path !== '/login') {
+  if (!user && path !== '/login' && path !== '/onboarding') {
     // If they are trying to access an API route, reject with JSON
     if (path.startsWith('/api')) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {

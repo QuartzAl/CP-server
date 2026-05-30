@@ -1,6 +1,6 @@
 // src/lib/server/mqtt.ts
 import mqtt from 'mqtt';
-import { MQTT_URL, MQTT_PASSWORD, MQTT_USER } from '$env/static/private'
+import { MQTT_URL, MQTT_PASSWORD, MQTT_USER } from '$env/dynamic/private'
 
 // 1. Tell TypeScript about our global variable
 const globalWithMqtt = globalThis as unknown as {

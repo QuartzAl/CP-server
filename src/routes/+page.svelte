@@ -77,7 +77,7 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					// nodeId: selectedNodeId,
+					nodeId: selectedNodeId,
 					value: Number(targetCurrentInput)
 				})
 			});
@@ -552,13 +552,15 @@
 							{/each}
 						</DropdownMenu.RadioGroup>
 						<DropdownMenu.Separator />
-						<DropdownMenu.Item
-							class="cursor-pointer font-medium text-primary"
-							onclick={handleAddNode}
-						>
-							<Plus class="mr-2 h-4 w-4" />
-							Add New Node...
-						</DropdownMenu.Item>
+						{#if page.data.user.role === 'admin'}
+							<DropdownMenu.Item
+								class="cursor-pointer font-medium text-primary"
+								onclick={handleAddNode}
+							>
+								<Plus class="mr-2 h-4 w-4" />
+								Add New Node...
+							</DropdownMenu.Item>
+						{/if}
 					</DropdownMenu.Content>
 				</DropdownMenu.Root>
 
