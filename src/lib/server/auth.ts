@@ -7,7 +7,7 @@ import { sveltekitCookies } from "better-auth/svelte-kit";
 import { getRequestEvent } from "$app/server";
 
 export const auth = betterAuth({
-  baseURL: BETTER_AUTH_URL || "http://localhost:5173",
+  baseURL: BETTER_AUTH_URL,
   database: prismaAdapter(prisma, {
     provider: "postgresql", // or "sqlite", "mysql"
   }),
