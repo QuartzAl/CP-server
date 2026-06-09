@@ -674,12 +674,12 @@
 				<Card.Header class="pb-2">
 					<Card.Title class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
 						<div class="h-2 w-2 rounded-full bg-red-500"></div>
-						Bus Current
+						Injection Current
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.busI?.at(-1)?.toFixed(2) ?? 'N/A'}
+						{data?.busI?.at(-1)?.toFixed(1) ?? 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">mA</span>
 					</div>
 				</Card.Content>
@@ -689,13 +689,13 @@
 				<Card.Header class="pb-2">
 					<Card.Title class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
 						<div class="h-2 w-2 rounded-full bg-blue-500"></div>
-						Current Electrode
+						Electrode Voltage
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.electrodeV?.at(-1)?.toFixed(2) ?? 'N/A'}
-						<span class="text-sm font-normal text-muted-foreground">V</span>
+						{(data?.electrodeV?.at(-1) * -1000.0)?.toFixed(0) ?? 'N/A'}
+						<span class="text-sm font-normal text-muted-foreground">mV</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
