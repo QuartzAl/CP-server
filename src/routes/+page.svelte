@@ -2,20 +2,12 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import type { PageData } from './$types';
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import * as Tabs from '$lib/components/ui/tabs';
-	import {
-		Activity,
-		ChevronDown,
-		Plus,
-		BrainCircuit,
-		Download,
-		LoaderCircle,
-		Send
-	} from 'lucide-svelte';
+	import { Activity, ChevronDown, Plus, BrainCircuit, LoaderCircle, Send } from 'lucide-svelte';
 	import type { SensorData } from '$lib/types/index';
 	import { authClient } from '$lib/auth-client';
 
@@ -35,13 +27,12 @@
 	async function handleAddNode() {
 		await goto('/node');
 	}
-	// --- State Management ---
 
+	// --- State Management ---
 	let serverData = $props<{ data: PageData }>();
-	//
 	let selectedNodeId = $state('');
 	let selectedNode = $derived(
-		serverData?.data?.nodes?.find((n) => n.id === selectedNodeId) ?? data?.nodes?.[0]
+		serverData?.data?.nodes?.find((n) => n.id === selectedNodeId) ?? serverData?.data?.nodes?.[0]
 	);
 	let selectedNodeName = $derived(selectedNode?.name ?? 'N/A');
 	let timespan = $state('1h');
@@ -54,7 +45,16 @@
 	let isFetchingData = $state(false);
 	let isInitialLoad = $state(true);
 
+	// Track which chart is currently fullscreen (0, 1, 2, or 3). null means none.
+	let fullscreenChartIndex = $state<number | null>(null);
+
 	let data = $state<SensorData | null>(null);
+
+	// Reactive variables to grab the last available NON-NULL value for the status cards
+	let latestBusV = $derived(data?.busV?.filter((v) => v !== null).at(-1));
+	let latestBusI = $derived(data?.busI?.filter((v) => v !== null).at(-1));
+	let latestElectrodeV = $derived(data?.electrodeV?.filter((v) => v !== null).at(-1));
+	let latestPredictedV = $derived(data?.predictedV?.filter((v) => v !== null).at(-1));
 
 	let targetCurrentInput = $state<number | ''>('');
 	let isSendingCommand = $state(false);
@@ -100,6 +100,53 @@
 		} finally {
 			isSendingCommand = false;
 		}
+	}
+
+	// Function to toggle any chart into fullscreen and update its axis logic
+	async function toggleFullscreen(index: number) {
+		const isOpening = fullscreenChartIndex !== index;
+		fullscreenChartIndex = isOpening ? index : null;
+
+		// Wait for Svelte to apply the fixed Tailwind classes to the DOM
+		await tick();
+
+		const chart = charts[index];
+		if (chart) {
+			// Toggle X and Y axes visibility
+			Object.keys(chart.options.scales).forEach((scaleKey) => {
+				if (scaleKey === 'x') {
+					// Toggle X axis labels
+					chart.options.scales[scaleKey].display = isOpening;
+				} else if (scaleKey.startsWith('y')) {
+					// Toggle Y axis start at 0
+					chart.options.scales[scaleKey].beginAtZero = isOpening;
+
+					// Force all Y axes to be visible in fullscreen mode
+					if (isOpening) {
+						chart.options.scales[scaleKey].display = true;
+					} else {
+						// Revert to default hidden state for specific secondary axes on Chart 1
+						if (scaleKey === 'yH' || scaleKey === 'yR') {
+							chart.options.scales[scaleKey].display = false;
+						} else {
+							chart.options.scales[scaleKey].display = true;
+						}
+					}
+				}
+			});
+
+			// Force chart to apply the new axis setting without animation judder
+			chart.update('none');
+		}
+
+		// Force an immediate resize to attempt to fill space quickly
+		charts.forEach((c) => c.resize());
+
+		// FIX: The CSS transition takes 300ms. We must force Chart.js to recalculate
+		// its dimensions AFTER the transition finishes to prevent the "elongated" canvas bug.
+		setTimeout(() => {
+			charts.forEach((c) => c.resize());
+		}, 310);
 	}
 
 	// Reactively re-render chart whenever shadcn Tabs or Dropdown values change
@@ -155,10 +202,13 @@
 
 		// 1. Take the complete snapshot immediately
 		const dataSnapshot = $state.snapshot(data);
-		console.log(dataSnapshot);
 
 		// If data isn't loaded yet or arrays are empty, exit safely
 		if (!dataSnapshot || !dataSnapshot.labels || dataSnapshot.labels.length === 0) return;
+
+		// Find the index that separates historical data from future (predicted) data
+		// (Fallback safely to length if API didn't return a splitIndex)
+		const splitIdx = (dataSnapshot as any).splitIndex ?? dataSnapshot.labels.length;
 
 		// 2. Calculate derived metrics using only the snapshot
 		const processed = {
@@ -170,9 +220,9 @@
 
 		for (let i = 0; i < dataSnapshot.labels.length; i++) {
 			// Fallback target current calculation if API doesn't provide one
-			if (processed.TbusI[i] === undefined) {
-				processed.TbusI[i] = dataSnapshot.busI[i] ? dataSnapshot.busI[i] * 0.95 : 12;
-			}
+			// if (processed.TbusI[i] === undefined || processed.TbusI[i] === null) {
+			// 	processed.TbusI[i] = dataSnapshot.busI[i] ? dataSnapshot.busI[i] * 0.95 : 12;
+			// }
 
 			const v = dataSnapshot.busV[i] ?? 0;
 			const current = dataSnapshot.busI[i] ?? 0;
@@ -188,41 +238,50 @@
 
 		// 3. OPTIMIZATION: If charts already exist, update their data matrices smoothly instead of destroying them
 		if (charts.length === 4) {
-			// Chart 1 Update
-			charts[0].data.labels = dataSnapshot.labels;
-			charts[0].data.datasets[0].data = dataSnapshot.busV;
-			charts[0].data.datasets[1].data = dataSnapshot.busI;
-			charts[0].data.datasets[2].data = dataSnapshot.humidity;
-			charts[0].data.datasets[3].data = processed.resistance;
+			// Chart 1 Update (Historical Only - slice arrays at current timestamp)
+			charts[0].data.labels = dataSnapshot.labels.slice(0, splitIdx);
+			charts[0].data.datasets[0].data = dataSnapshot.busV.slice(0, splitIdx);
+			charts[0].data.datasets[1].data = dataSnapshot.busI.slice(0, splitIdx);
+			charts[0].data.datasets[2].data = dataSnapshot.humidity.slice(0, splitIdx);
+			charts[0].data.datasets[3].data = processed.resistance.slice(0, splitIdx);
 
-			// Chart 2 Update
-			charts[1].data.labels = dataSnapshot.labels;
-			charts[1].data.datasets[0].data = dataSnapshot.busI;
-			charts[1].data.datasets[1].data = processed.TbusI;
-			charts[1].data.datasets[2].data = processed.deviation;
-			// calculate the location of min max for the deviation scale
-			const targetMean = processed.TbusI.reduce((a, b) => a + b, 0) / processed.TbusI.length;
-			const targetMin = Math.min(...processed.busI);
-			const targetMax = Math.max(...processed.busI);
-			const devMin = Math.min(...processed.deviation);
-			const devMax = Math.max(...processed.deviation);
+			// Chart 2 Update (Historical Only - slice arrays at current timestamp)
+			charts[1].data.labels = dataSnapshot.labels.slice(0, splitIdx);
+			charts[1].data.datasets[0].data = dataSnapshot.busI.slice(0, splitIdx);
+			charts[1].data.datasets[1].data = processed.TbusI.slice(0, splitIdx);
+			charts[1].data.datasets[2].data = processed.deviation.slice(0, splitIdx);
 
-			const ratio = (targetMean - targetMin) / (targetMax - targetMin);
+			// Compute mins/maxs strictly over the historical slice avoiding nulls and NaN
+			const histTbusI = processed.TbusI.slice(0, splitIdx);
+			const histBusI = dataSnapshot.busI.slice(0, splitIdx);
+			const histDev = processed.deviation.slice(0, splitIdx);
+
+			const targetMean = histTbusI.reduce((a, b) => a + (b || 0), 0) / (histTbusI.length || 1);
+			const validHistBusI = histBusI.filter((v) => v !== null) as number[];
+			const validHistDev = histDev.filter((v) => v !== null) as number[];
+
+			const targetMin = validHistBusI.length ? Math.min(...validHistBusI) : 0;
+			const targetMax = validHistBusI.length ? Math.max(...validHistBusI) : 0;
+			const devMin = validHistDev.length ? Math.min(...validHistDev) : 0;
+			const devMax = validHistDev.length ? Math.max(...validHistDev) : 0;
+
+			const ratio =
+				targetMax - targetMin !== 0 ? (targetMean - targetMin) / (targetMax - targetMin) : 0.5;
 			if (ratio <= 0 || ratio >= 1) {
 				console.warn('Target is outside primary axis bounds.');
 			}
-			const cMax = devMax > 0 ? devMax / (1 - ratio) : 0;
-			const cMin = devMin < 0 ? Math.abs(devMin) / ratio : 0;
+			const cMax = devMax > 0 && ratio !== 1 ? devMax / (1 - ratio) : 0;
+			const cMin = devMin < 0 && ratio !== 0 ? Math.abs(devMin) / ratio : 0;
 			const C = Math.max(cMax, cMin);
 			charts[1].min = -(C * ratio);
 			charts[1].max = C * (1 - ratio);
 
-			// Chart 3 Update
+			// Chart 3 Update (Historical + Future Predictions)
 			charts[2].data.labels = dataSnapshot.labels;
 			charts[2].data.datasets[0].data = dataSnapshot.electrodeV;
 			charts[2].data.datasets[1].data = dataSnapshot.predictedV;
 
-			// Chart 4 Update
+			// Chart 4 Update (Historical + Future Predictions)
 			charts[3].data.labels = dataSnapshot.labels;
 			charts[3].data.datasets[0].data = dataSnapshot.busI;
 			charts[3].data.datasets[1].data = processed.TbusI;
@@ -230,7 +289,7 @@
 			charts[3].data.datasets[3].data = dataSnapshot.predictedV;
 
 			// Tell Chart.js to animate the new data points in seamlessly
-			charts.forEach((c) => c.update()); // Use 'none' or 'resize' to prevent jarring animation snaps
+			charts.forEach((c) => c.update());
 			return;
 		}
 
@@ -250,17 +309,17 @@
 			scales: { x: { display: false } }
 		};
 
-		// --- Chart 1: Bus V, Bus I, Soil Humidity, Resistance ---
+		// --- Chart 1 (Index 0): Bus V, Bus I, Soil Humidity, Resistance (Historical) ---
 		// @ts-ignore
 		charts.push(
 			new Chart(canvas1.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels,
+					labels: dataSnapshot.labels.slice(0, splitIdx),
 					datasets: [
 						{
 							label: 'Voltage (V)',
-							data: dataSnapshot.busV,
+							data: dataSnapshot.busV.slice(0, splitIdx),
 							borderColor: '#eab308',
 							yAxisID: 'yV',
 							tension: 0.4,
@@ -269,7 +328,7 @@
 						},
 						{
 							label: 'Current (mA)',
-							data: dataSnapshot.busI,
+							data: dataSnapshot.busI.slice(0, splitIdx),
 							borderColor: '#ef4444',
 							yAxisID: 'yI',
 							tension: 0.4,
@@ -278,7 +337,7 @@
 						},
 						{
 							label: 'Humidity (%)',
-							data: dataSnapshot.humidity,
+							data: dataSnapshot.humidity.slice(0, splitIdx),
 							borderColor: '#22c55e',
 							yAxisID: 'yH',
 							tension: 0.4,
@@ -288,7 +347,7 @@
 						},
 						{
 							label: 'Resistance (Ω)',
-							data: processed.resistance,
+							data: processed.resistance.slice(0, splitIdx),
 							borderColor: '#64748b',
 							yAxisID: 'yR',
 							tension: 0.4,
@@ -308,24 +367,36 @@
 							grid: { drawOnChartArea: false },
 							title: { display: true, text: 'Current (mA)' }
 						},
-						yH: { display: false },
-						yR: { display: false }
+						yH: {
+							type: 'linear',
+							position: 'right',
+							display: false,
+							grid: { drawOnChartArea: false },
+							title: { display: true, text: 'Humidity (%)' }
+						},
+						yR: {
+							type: 'linear',
+							position: 'left',
+							display: false,
+							grid: { drawOnChartArea: false },
+							title: { display: true, text: 'Resistance (Ω)' }
+						}
 					}
 				}
 			})
 		);
 
-		// --- Chart 2: Bus Current, Target Current, Deviation ---
+		// --- Chart 2 (Index 1): Bus Current, Target Current, Deviation (Historical) ---
 		// @ts-ignore
 		charts.push(
 			new Chart(canvas2.getContext('2d'), {
 				type: 'line',
 				data: {
-					labels: dataSnapshot.labels,
+					labels: dataSnapshot.labels.slice(0, splitIdx),
 					datasets: [
 						{
 							label: 'Current (mA)',
-							data: dataSnapshot.busI,
+							data: dataSnapshot.busI.slice(0, splitIdx),
 							borderColor: '#ef4444',
 							yAxisID: 'yI',
 							tension: 0.4,
@@ -334,7 +405,7 @@
 						},
 						{
 							label: 'Target (mA)',
-							data: processed.TbusI,
+							data: processed.TbusI.slice(0, splitIdx),
 							borderColor: '#3b82f6',
 							yAxisID: 'yI',
 							tension: 0.4,
@@ -345,11 +416,9 @@
 						{
 							type: 'bar',
 							label: 'Deviation (mA)',
-							data: processed.deviation,
+							data: processed.deviation.slice(0, splitIdx),
 							backgroundColor: 'rgba(239, 68, 68, 0.2)',
 							yAxisID: 'yD'
-							// max: charts[1].max,
-							// min: charts[1].min
 						}
 					]
 				},
@@ -371,7 +440,7 @@
 			})
 		);
 
-		// --- Chart 3: Electrode V & AI Predicted V ---
+		// --- Chart 3 (Index 2): Electrode V & AI Predicted V (Full Timeline) ---
 		// @ts-ignore
 		charts.push(
 			new Chart(canvas3.getContext('2d'), {
@@ -414,7 +483,7 @@
 			})
 		);
 
-		// --- Chart 4: Current, Target, Electrode, Predicted ---
+		// --- Chart 4 (Index 3): Current, Target, Electrode, Predicted (Full Timeline) ---
 		// @ts-ignore
 		charts.push(
 			new Chart(canvas4.getContext('2d'), {
@@ -488,10 +557,9 @@
 		script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
 		script.onload = () => {
 			isChartJsLoaded = true;
-			// The reactive statement $: if(isChartJsLoaded) will handle the initial render now
 		};
 		document.head.appendChild(script);
-		// fetchRealData(timespan, selectedNodeId);
+
 		intervalID = setInterval(function () {
 			fetchRealData(timespan, selectedNodeId);
 		}, 5000);
@@ -508,7 +576,7 @@
 </script>
 
 <div class="min-h-screen bg-background font-sans text-foreground">
-	<!-- STREAMING_CHUNK:Header & Navigation -->
+	<!-- Header & Navigation -->
 	<header class="sticky top-0 z-30 border-b bg-background shadow-sm">
 		<div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
 			<!-- Logo & Title -->
@@ -540,9 +608,8 @@
 							>Active Nodes</DropdownMenu.Label
 						>
 						<DropdownMenu.Separator />
-						<!-- RadioGroup binds directly to our selectedNodeId state -->
 						<DropdownMenu.RadioGroup bind:value={selectedNodeId}>
-							{#each serverData?.data?.nodes as node}
+							{#each serverData?.data?.nodes || [] as node}
 								<DropdownMenu.RadioItem value={node.id} class="cursor-pointer">
 									<div class="flex w-full flex-col">
 										<span>{node.name}</span>
@@ -552,7 +619,7 @@
 							{/each}
 						</DropdownMenu.RadioGroup>
 						<DropdownMenu.Separator />
-						{#if page.data.user.role === 'admin'}
+						{#if page.data?.user?.role === 'admin'}
 							<DropdownMenu.Item
 								class="cursor-pointer font-medium text-primary"
 								onclick={handleAddNode}
@@ -564,7 +631,7 @@
 					</DropdownMenu.Content>
 				</DropdownMenu.Root>
 
-				{#if page.data.user.role === 'admin'}
+				{#if page.data?.user?.role === 'admin'}
 					<Button variant="ghost" onclick={adminPanel}>Admin Panel</Button>
 				{/if}
 				<Button variant="ghost" onclick={signOut}>Sign Out</Button>
@@ -572,7 +639,7 @@
 		</div>
 	</header>
 
-	<!-- STREAMING_CHUNK:Main Content Area -->
+	<!-- Main Content Area -->
 	<main class="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
 		<!-- Header & Timespan Controls -->
 		<div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
@@ -632,7 +699,7 @@
 							type="number"
 							bind:value={targetCurrentInput}
 							placeholder="e.g. 1200"
-							class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-[150px]"
+							class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-[150px]"
 							min="0"
 							max="10000"
 						/>
@@ -653,7 +720,7 @@
 			</Card.Content>
 		</Card.Root>
 
-		<!-- STREAMING_CHUNK:System Status Cards -->
+		<!-- System Status Cards -->
 		<div class="grid grid-cols-2 gap-4 md:grid-cols-4">
 			<Card.Root>
 				<Card.Header class="pb-2">
@@ -664,7 +731,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.busV?.at(-1)?.toFixed(2) ?? 'N/A'}
+						{latestBusV !== undefined ? latestBusV.toFixed(2) : 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">V</span>
 					</div>
 				</Card.Content>
@@ -679,7 +746,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.busI?.at(-1)?.toFixed(1) ?? 'N/A'}
+						{latestBusI !== undefined ? latestBusI.toFixed(1) : 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">mA</span>
 					</div>
 				</Card.Content>
@@ -694,13 +761,12 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{(data?.electrodeV?.at(-1) * -1000.0)?.toFixed(0) ?? 'N/A'}
+						{latestElectrodeV !== undefined ? (latestElectrodeV * -1000.0).toFixed(0) : 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">mV</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
 
-			<!-- Custom styled shadcn Card for AI feature -->
 			<Card.Root
 				class="relative overflow-hidden border-0 bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-sm"
 			>
@@ -715,7 +781,7 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{data?.predictedV?.at(-1)?.toFixed(2) ?? 'N/A'}
+						{latestPredictedV !== undefined ? latestPredictedV.toFixed(2) : 'N/A'}
 						<span class="text-sm font-normal text-purple-200">V (Forecast)</span>
 					</div>
 				</Card.Content>
@@ -738,43 +804,145 @@
 
 			<div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
 				<!-- Chart 1 -->
-				<Card.Root class="flex flex-col">
+				<Card.Root
+					class="flex cursor-pointer flex-col transition-all duration-300 ease-in-out hover:border-primary/50 hover:shadow-md {fullscreenChartIndex ===
+					0
+						? 'fixed inset-0 z-[50] m-0 h-screen w-screen rounded-none bg-background p-4 shadow-2xl sm:p-6'
+						: ''}"
+					onclick={(e) => {
+						// Don't close if they are clicking the canvas directly to view tooltips
+						if (fullscreenChartIndex === 0 && e.target.tagName === 'CANVAS') return;
+						toggleFullscreen(0);
+					}}
+				>
 					<Card.Header class="flex flex-row items-center justify-between pb-2">
 						<Card.Title class="text-sm font-medium">Power & Environmental Constraints</Card.Title>
+						{#if fullscreenChartIndex === 0}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={(e) => {
+									e.stopPropagation();
+									toggleFullscreen(0);
+								}}
+							>
+								Close Fullscreen
+							</Button>
+						{/if}
 					</Card.Header>
-					<Card.Content class="relative h-[300px] flex-1">
+					<!-- overflow-hidden prevents the elongation bug during CSS layout shifts -->
+					<Card.Content
+						class="relative w-full overflow-hidden {fullscreenChartIndex === 0
+							? 'min-h-[500px] flex-1'
+							: 'h-[300px]'}"
+					>
 						<canvas bind:this={canvas1}></canvas>
 					</Card.Content>
 				</Card.Root>
 
 				<!-- Chart 2 -->
-				<Card.Root class="flex flex-col">
+				<Card.Root
+					class="flex cursor-pointer flex-col transition-all duration-300 ease-in-out hover:border-primary/50 hover:shadow-md {fullscreenChartIndex ===
+					1
+						? 'fixed inset-0 z-[50] m-0 h-screen w-screen rounded-none bg-background p-4 shadow-2xl sm:p-6'
+						: ''}"
+					onclick={(e) => {
+						if (fullscreenChartIndex === 1 && e.target.tagName === 'CANVAS') return;
+						toggleFullscreen(1);
+					}}
+				>
 					<Card.Header class="flex flex-row items-center justify-between pb-2">
 						<Card.Title class="text-sm font-medium">Target Current Tracking & Deviation</Card.Title>
+						{#if fullscreenChartIndex === 1}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={(e) => {
+									e.stopPropagation();
+									toggleFullscreen(1);
+								}}
+							>
+								Close Fullscreen
+							</Button>
+						{/if}
 					</Card.Header>
-					<Card.Content class="relative h-[300px] flex-1">
+					<Card.Content
+						class="relative w-full overflow-hidden {fullscreenChartIndex === 1
+							? 'min-h-[500px] flex-1'
+							: 'h-[300px]'}"
+					>
 						<canvas bind:this={canvas2}></canvas>
 					</Card.Content>
 				</Card.Root>
 
 				<!-- Chart 3 -->
-				<Card.Root class="flex flex-col">
+				<Card.Root
+					class="flex cursor-pointer flex-col transition-all duration-300 ease-in-out hover:border-primary/50 hover:shadow-md {fullscreenChartIndex ===
+					2
+						? 'fixed inset-0 z-[50] m-0 h-screen w-screen rounded-none bg-background p-4 shadow-2xl sm:p-6'
+						: ''}"
+					onclick={(e) => {
+						if (fullscreenChartIndex === 2 && e.target.tagName === 'CANVAS') return;
+						toggleFullscreen(2);
+					}}
+				>
 					<Card.Header class="flex flex-row items-center justify-between pb-2">
 						<Card.Title class="text-sm font-medium">AI Electrode Prediction Accuracy</Card.Title>
+						{#if fullscreenChartIndex === 2}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={(e) => {
+									e.stopPropagation();
+									toggleFullscreen(2);
+								}}
+							>
+								Close Fullscreen
+							</Button>
+						{/if}
 					</Card.Header>
-					<Card.Content class="relative h-[300px] flex-1">
+					<Card.Content
+						class="relative w-full overflow-hidden {fullscreenChartIndex === 2
+							? 'min-h-[500px] flex-1'
+							: 'h-[300px]'}"
+					>
 						<canvas bind:this={canvas3}></canvas>
 					</Card.Content>
 				</Card.Root>
 
 				<!-- Chart 4 -->
-				<Card.Root class="flex flex-col">
+				<Card.Root
+					class="flex cursor-pointer flex-col transition-all duration-300 ease-in-out hover:border-primary/50 hover:shadow-md {fullscreenChartIndex ===
+					3
+						? 'fixed inset-0 z-[50] m-0 h-screen w-screen rounded-none bg-background p-4 shadow-2xl sm:p-6'
+						: ''}"
+					onclick={(e) => {
+						if (fullscreenChartIndex === 3 && e.target.tagName === 'CANVAS') return;
+						toggleFullscreen(3);
+					}}
+				>
 					<Card.Header class="flex flex-row items-center justify-between pb-2">
 						<Card.Title class="text-sm font-medium"
 							>System Overview (Current & Potential)</Card.Title
 						>
+						{#if fullscreenChartIndex === 3}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={(e) => {
+									e.stopPropagation();
+									toggleFullscreen(3);
+								}}
+							>
+								Close Fullscreen
+							</Button>
+						{/if}
 					</Card.Header>
-					<Card.Content class="relative h-[300px] flex-1">
+					<Card.Content
+						class="relative w-full overflow-hidden {fullscreenChartIndex === 3
+							? 'min-h-[500px] flex-1'
+							: 'h-[300px]'}"
+					>
 						<canvas bind:this={canvas4}></canvas>
 					</Card.Content>
 				</Card.Root>

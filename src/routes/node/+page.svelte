@@ -183,7 +183,7 @@
 								</Table.Row>
 							</Table.Header>
 							<Table.Body>
-								{#each data.nodes as node}
+								{#each data.nodes as node (node.id)}
 									<Table.Row>
 										<!-- Node ID & Friendly Name -->
 										<Table.Cell>
@@ -212,19 +212,17 @@
 											<div class="flex justify-end gap-1">
 												<AlertDialog.Root>
 													<AlertDialog.Trigger>
-														{#snippet child({ props })}
-															<Button
-																{...props}
-																variant="ghost"
-																size="icon"
-																title="Decommission Node"
-															>
-																<Trash2
-																	class="h-4 w-4 text-destructive opacity-80 hover:opacity-100"
-																/>
-																<span class="sr-only">Delete</span>
-															</Button>
-														{/snippet}
+														<Button
+															type="button"
+															variant="ghost"
+															size="icon"
+															title="Decommission Node"
+														>
+															<Trash2
+																class="h-4 w-4 text-destructive opacity-80 hover:opacity-100"
+															/>
+															<span class="sr-only">Delete</span>
+														</Button>
 													</AlertDialog.Trigger>
 													<AlertDialog.Content>
 														<AlertDialog.Header>

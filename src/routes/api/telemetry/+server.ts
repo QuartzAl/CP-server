@@ -3,12 +3,13 @@ import { env } from '$env/dynamic/private';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 
-// Define the shape of our time configuration
+// Define the shape of our time configuration using precise millisecond offsets
 interface TimeConfig {
-  range: string;
   window: string;
   model: string | null;
   horizon: string | null;
+  startMs: number;
+  stopMs: number;
 }
 
 // Define the expected shape of a row coming back from InfluxDB Flux queries
@@ -18,27 +19,34 @@ interface InfluxRow {
   _value: number;
   node_id?: string;
   _measurement?: string;
+  model?: string;
+  type?: string;
+  horizon?: string;
   [key: string]: any; // Allow other properties just in case
 }
 
 export const GET: RequestHandler = async ({ url }) => {
   const timespan = url.searchParams.get('timespan') || '24h';
   const nodeId = url.searchParams.get('node') || '001';
-  console.log(`MQTT API: timespan ${timespan}, node ${nodeId}`)
+  console.log(`MQTT API: timespan ${timespan}, node ${nodeId}`);
 
-  // Map the UI timespans to InfluxDB time ranges and aggregation windows
+  // Map the UI timespans to precise millisecond offsets (History and Future)
   const timeConfig: Record<string, TimeConfig> = {
-    '15m': { range: '-15m', window: '30s', model: 'keras_30s_service', horizon: null },
-    '1h': { range: '-1h', window: '2m', model: 'keras_2m_service', horizon: null },
-    '24h': { range: '-24h', window: '30m', model: 'keras_10m_service', horizon: null },
-    '7d': { range: '-7d', window: '3h', model: 'tft_darts_service', horizon: '2950m' },
-    '30d': { range: '-30d', window: '12h', model: null, horizon: null }
+    '15m': { startMs: 15 * 60 * 1000, stopMs: 7.5 * 60 * 1000, window: '30s', model: 'keras_30s_service', horizon: null },
+    '1h': { startMs: 60 * 60 * 1000, stopMs: 30 * 60 * 1000, window: '2m', model: 'keras_2m_service', horizon: null },
+    '24h': { startMs: 24 * 60 * 60 * 1000, stopMs: 12 * 60 * 60 * 1000, window: '30m', model: 'keras_10m_service', horizon: null },
+    '7d': { startMs: 7 * 24 * 60 * 60 * 1000, stopMs: 3.5 * 24 * 60 * 60 * 1000, window: '3h', model: 'tft_darts_service', horizon: '2950m' },
+    '30d': { startMs: 30 * 24 * 60 * 60 * 1000, stopMs: 15 * 24 * 60 * 60 * 1000, window: '12h', model: null, horizon: null }
   };
 
   const config: TimeConfig = timeConfig[timespan] || timeConfig['24h'];
 
+  // Calculate the absolute time range bounds as ISO strings for Flux
+  const now = Date.now();
+  const startIso = new Date(now - config.startMs).toISOString();
+  const stopIso = new Date(now + config.stopMs).toISOString();
+
   // Initialize the InfluxDB client securely using environment variables.
-  // Notice the "as string" assertions, assuring TS these environment variables exist.
   const queryApi = new InfluxDB({
     url: env.INFLUX_URL as string,
     token: env.INFLUX_TOKEN as string
@@ -49,10 +57,11 @@ export const GET: RequestHandler = async ({ url }) => {
       : `or (r._field == "electrode_V" and r.model == "${config.model}" and r.type == "forecast")`
     : "";
 
-  // Flux Query: Filters by node, gets all fields, and downsamples the data
+  // Flux Query: Ranges from absolute start to absolute stop time
+  // NO quotes are placed around the ISO strings, so flux handles them as raw Time literals
   const fluxQuery = `
       from(bucket:"${env.INFLUX_BUCKET}")
-          |> range(start: ${config.range})
+          |> range(start: ${startIso}, stop: ${stopIso})
           |> filter(fn: (r) => r.device_id == "${nodeId}")
           |> filter(fn: (r) => 
               r._field == "bus_voltage_V" or 
@@ -67,7 +76,6 @@ export const GET: RequestHandler = async ({ url }) => {
   `;
 
   try {
-    // Data structures explicitly typed for Chart.js
     const labels: string[] = [];
     const datasets: {
       busV: (number | null)[];
@@ -80,7 +88,6 @@ export const GET: RequestHandler = async ({ url }) => {
       busV: [], busI: [], TbusI: [], electrodeV: [], humidity: [], predictedV: []
     };
 
-    // We use a Set to track unique timestamps so we don't duplicate labels
     const timeSet = new Set<string>();
     const rows: InfluxRow[] = [];
 
@@ -92,11 +99,15 @@ export const GET: RequestHandler = async ({ url }) => {
     }
 
     const sortedTimes = Array.from(timeSet).sort();
+
+    // Find where the present moment occurs in our timeline to help the frontend clip the historical charts
+    const nowIndex = sortedTimes.findIndex(t => new Date(t).getTime() > now);
+    const splitIndex = nowIndex === -1 ? sortedTimes.length : nowIndex;
+
     sortedTimes.forEach(timeString => {
       const d = new Date(timeString);
       let label = "";
 
-      // 1. If looking at a span of days/weeks, show Date + Time
       if (timespan.includes('d') || timespan.includes('w')) {
         label = d.toLocaleString([], {
           month: 'short',
@@ -105,7 +116,6 @@ export const GET: RequestHandler = async ({ url }) => {
           minute: '2-digit'
         });
       }
-      // 2. If your window is in seconds ('30s'), you need seconds on the label!
       else if (config.window.includes('s')) {
         label = d.toLocaleTimeString([], {
           hour: '2-digit',
@@ -113,7 +123,6 @@ export const GET: RequestHandler = async ({ url }) => {
           second: '2-digit'
         });
       }
-      // 3. Default for hours ('-1h', '-15h') with standard windows
       else {
         label = d.toLocaleTimeString([], {
           hour: '2-digit',
@@ -128,13 +137,13 @@ export const GET: RequestHandler = async ({ url }) => {
     sortedTimes.forEach(time => {
       const timeRows = rows.filter(r => r._time === time);
 
-      // ONLY match rows that DO NOT have a 'model' property (the raw telemetry)
+      // Raw telemetry
       const getVal = (field: string): number | null => {
         const row = timeRows.find(r => r._field === field && !r.model);
         return row ? row._value : null;
       };
 
-      // ONLY match rows that have the matching 'model' property
+      // Future/Prediction
       const getPrediction = (modelName: string): number | null => {
         const row = timeRows.find(r => r._field === 'electrode_V' && r.model === modelName);
         return row ? row._value : null;
@@ -146,7 +155,6 @@ export const GET: RequestHandler = async ({ url }) => {
       datasets.electrodeV.push(getVal('electrode_V'));
       datasets.humidity.push(getVal('soil_humidity_V'));
 
-      // Real AI prediction logic pulling from the DB row
       if (config.model) {
         datasets.predictedV.push(getPrediction(config.model));
       } else {
@@ -154,7 +162,8 @@ export const GET: RequestHandler = async ({ url }) => {
       }
     });
 
-    return json({ labels, ...datasets });
+    // Return the splitIndex down to Svelte
+    return json({ labels, splitIndex, ...datasets });
 
   } catch (error) {
     console.error("InfluxDB Query Error:", error);
