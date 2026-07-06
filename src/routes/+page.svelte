@@ -45,6 +45,10 @@
 	let isFetchingData = $state(false);
 	let isInitialLoad = $state(true);
 
+	// Anomaly Detection Thresholds (Volts)
+	let anomalyMax = $state(-0.85);
+	let anomalyMin = $state(-1.2);
+
 	// Track which chart is currently fullscreen (0, 1, 2, or 3). null means none.
 	let fullscreenChartIndex = $state<number | null>(null);
 
@@ -54,7 +58,15 @@
 	let latestBusV = $derived(data?.busV?.filter((v) => v !== null).at(-1));
 	let latestBusI = $derived(data?.busI?.filter((v) => v !== null).at(-1));
 	let latestElectrodeV = $derived(data?.electrodeV?.filter((v) => v !== null).at(-1));
-	let latestPredictedV = $derived(data?.predictedV?.filter((v) => v !== null).at(-1));
+	let latestPredictedV = $derived(data?.predictedV?.filter((v) => v !== null).at(-1) * 1000);
+
+	// Calculate the protection status based on the defined anomaly thresholds
+	let protectionStatus = $derived.by(() => {
+		if (latestPredictedV === undefined || latestPredictedV === null) return 'unknown';
+		if (latestPredictedV > (anomalyMax * 1000)) return 'underprotected';
+		if (latestPredictedV < (anomalyMin * 1000)) return 'overprotected';
+		return 'protected';
+	});
 
 	let targetCurrentInput = $state<number | ''>('');
 	let isSendingCommand = $state(false);
@@ -168,6 +180,27 @@
 		runUpdatePipeline();
 	});
 
+	// Reactively update anomaly bounds without re-fetching data
+	$effect(() => {
+		if (charts.length === 4 && data?.labels) {
+			const len = data.labels.length;
+			const topData = Array(len).fill(anomalyMax);
+			const bottomData = Array(len).fill(anomalyMin);
+
+			// Chart 3 uses indices 2 and 3 for the anomaly bounds
+			charts[2].data.datasets[2].data = topData;
+			charts[2].data.datasets[3].data = bottomData;
+
+			// Chart 4 uses indices 4 and 5 for the anomaly bounds
+			charts[3].data.datasets[4].data = topData;
+			charts[3].data.datasets[5].data = bottomData;
+
+			// Update the charts instantly without animation
+			charts[2].update('none');
+			charts[3].update('none');
+		}
+	});
+
 	// --- Real Data Fetcher ---
 	async function fetchRealData(span, node) {
 		try {
@@ -219,11 +252,6 @@
 		};
 
 		for (let i = 0; i < dataSnapshot.labels.length; i++) {
-			// Fallback target current calculation if API doesn't provide one
-			// if (processed.TbusI[i] === undefined || processed.TbusI[i] === null) {
-			// 	processed.TbusI[i] = dataSnapshot.busI[i] ? dataSnapshot.busI[i] * 0.95 : 12;
-			// }
-
 			const v = dataSnapshot.busV[i] ?? 0;
 			const current = dataSnapshot.busI[i] ?? 0;
 
@@ -235,6 +263,11 @@
 			const t = processed.TbusI[i];
 			processed.deviation[i] = current !== null && t !== null ? +(current - t).toFixed(2) : null;
 		}
+
+		// Calculate arrays for the anomaly bounds based on the full timeline
+		const len = dataSnapshot.labels.length;
+		const anomalyTopData = Array(len).fill(anomalyMax);
+		const anomalyBottomData = Array(len).fill(anomalyMin);
 
 		// 3. OPTIMIZATION: If charts already exist, update their data matrices smoothly instead of destroying them
 		if (charts.length === 4) {
@@ -280,6 +313,8 @@
 			charts[2].data.labels = dataSnapshot.labels;
 			charts[2].data.datasets[0].data = dataSnapshot.electrodeV;
 			charts[2].data.datasets[1].data = dataSnapshot.predictedV;
+			charts[2].data.datasets[2].data = anomalyTopData;
+			charts[2].data.datasets[3].data = anomalyBottomData;
 
 			// Chart 4 Update (Historical + Future Predictions)
 			charts[3].data.labels = dataSnapshot.labels;
@@ -287,6 +322,8 @@
 			charts[3].data.datasets[1].data = processed.TbusI;
 			charts[3].data.datasets[2].data = dataSnapshot.electrodeV;
 			charts[3].data.datasets[3].data = dataSnapshot.predictedV;
+			charts[3].data.datasets[4].data = anomalyTopData;
+			charts[3].data.datasets[5].data = anomalyBottomData;
 
 			// Tell Chart.js to animate the new data points in seamlessly
 			charts.forEach((c) => c.update());
@@ -466,6 +503,26 @@
 							borderWidth: 2,
 							pointRadius: 0,
 							borderDash: [5, 5]
+						},
+						{
+							label: 'Upper Bound',
+							data: anomalyTopData,
+							borderColor: '#ef4444', // Red
+							yAxisID: 'yE',
+							borderWidth: 1.5,
+							pointRadius: 0,
+							borderDash: [4, 4],
+							tension: 0
+						},
+						{
+							label: 'Lower Bound',
+							data: anomalyBottomData,
+							borderColor: '#ef4444', // Red
+							yAxisID: 'yE',
+							borderWidth: 1.5,
+							pointRadius: 0,
+							borderDash: [4, 4],
+							tension: 0
 						}
 					]
 				},
@@ -528,6 +585,26 @@
 							borderWidth: 2,
 							pointRadius: 0,
 							borderDash: [5, 5]
+						},
+						{
+							label: 'Upper Bound',
+							data: anomalyTopData,
+							borderColor: '#ef4444', // Red
+							yAxisID: 'yE',
+							borderWidth: 1.5,
+							pointRadius: 0,
+							borderDash: [4, 4],
+							tension: 0
+						},
+						{
+							label: 'Lower Bound',
+							data: anomalyBottomData,
+							borderColor: '#ef4444', // Red
+							yAxisID: 'yE',
+							borderWidth: 1.5,
+							pointRadius: 0,
+							borderDash: [4, 4],
+							tension: 0
 						}
 					]
 				},
@@ -673,52 +750,100 @@
 			</Tabs.Root>
 		</div>
 
-		<Card.Root class="border-dashed bg-muted/30 shadow-sm">
-			<Card.Content class="flex flex-col justify-between gap-4 p-4 sm:flex-row sm:items-center">
-				<div>
-					<h3 class="flex items-center gap-2 text-sm font-semibold">
-						<Send class="h-4 w-4 text-primary" />
-						Target Current Override
-					</h3>
-					<p class="mt-1 text-xs text-muted-foreground">
-						Manually set the target current (mA) for {selectedNodeName}
-					</p>
-				</div>
-				<div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-					{#if commandStatus.text}
-						<span
-							class="text-xs font-medium {commandStatus.type === 'error'
-								? 'text-destructive'
-								: 'text-green-600 dark:text-green-400'}"
-						>
-							{commandStatus.text}
-						</span>
-					{/if}
-					<div class="flex items-center gap-2">
-						<input
-							type="number"
-							bind:value={targetCurrentInput}
-							placeholder="e.g. 1200"
-							class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-[150px]"
-							min="0"
-							max="10000"
-						/>
-						<Button
-							size="sm"
-							onclick={handleSetTargetCurrent}
-							disabled={isSendingCommand || targetCurrentInput === ''}
-						>
-							{#if isSendingCommand}
-								<LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
-								Sending
-							{:else}
-								Set Target
-							{/if}
-						</Button>
+		<!-- Control Panels Grid (Target Current & Anomaly Thresholds) -->
+		<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+			<!-- Target Current Override -->
+			<Card.Root class="border-dashed bg-muted/30 shadow-sm">
+				<Card.Content class="flex flex-col justify-between gap-4 p-4 sm:flex-row sm:items-center">
+					<div>
+						<h3 class="flex items-center gap-2 text-sm font-semibold">
+							<Send class="h-4 w-4 text-primary" />
+							Target Current Override
+						</h3>
+						<p class="mt-1 text-xs text-muted-foreground">
+							Manually set the target current (mA) for {selectedNodeName}
+						</p>
 					</div>
-				</div>
-			</Card.Content>
-		</Card.Root>
+					<div class="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+						{#if commandStatus.text}
+							<span
+								class="text-xs font-medium {commandStatus.type === 'error'
+									? 'text-destructive'
+									: 'text-green-600 dark:text-green-400'}"
+							>
+								{commandStatus.text}
+							</span>
+						{/if}
+						<div class="flex items-center gap-2">
+							<input
+								type="number"
+								bind:value={targetCurrentInput}
+								placeholder="e.g. 1200"
+								class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:w-[150px]"
+								min="0"
+								max="10000"
+							/>
+							<Button
+								size="sm"
+								onclick={handleSetTargetCurrent}
+								disabled={isSendingCommand || targetCurrentInput === ''}
+							>
+								{#if isSendingCommand}
+									<LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+									Sending
+								{:else}
+									Set Target
+								{/if}
+							</Button>
+						</div>
+					</div>
+				</Card.Content>
+			</Card.Root>
+
+			<!-- Anomaly Bounds Override -->
+			<Card.Root class="border-dashed bg-muted/30 shadow-sm">
+				<Card.Content class="flex flex-col justify-between gap-4 p-4 sm:flex-row sm:items-center">
+					<div>
+						<h3 class="flex items-center gap-2 text-sm font-semibold">
+							<Activity class="h-4 w-4 text-destructive" />
+							Electrode Anomaly Bounds (V)
+						</h3>
+						<p class="mt-1 text-xs text-muted-foreground">
+							Define top and bottom voltage bounds for charts
+						</p>
+					</div>
+					<div class="flex items-center gap-2">
+						<div class="flex flex-col gap-1">
+							<label
+								for="anomalyMax"
+								class="text-[10px] font-semibold text-muted-foreground uppercase">Top (Max)</label
+							>
+							<input
+								id="anomalyMax"
+								type="number"
+								step="0.01"
+								bind:value={anomalyMax}
+								class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none sm:w-[100px]"
+							/>
+						</div>
+						<div class="flex flex-col gap-1">
+							<label
+								for="anomalyMin"
+								class="text-[10px] font-semibold text-muted-foreground uppercase"
+								>Bottom (Min)</label
+							>
+							<input
+								id="anomalyMin"
+								type="number"
+								step="0.01"
+								bind:value={anomalyMin}
+								class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none sm:w-[100px]"
+							/>
+						</div>
+					</div>
+				</Card.Content>
+			</Card.Root>
+		</div>
 
 		<!-- System Status Cards -->
 		<div class="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -761,28 +886,44 @@
 				</Card.Header>
 				<Card.Content>
 					<div class="text-2xl font-bold">
-						{latestElectrodeV !== undefined ? (latestElectrodeV * -1000.0).toFixed(0) : 'N/A'}
+						{latestElectrodeV !== undefined ? (latestElectrodeV * 1000.0).toFixed(0) : 'N/A'}
 						<span class="text-sm font-normal text-muted-foreground">mV</span>
 					</div>
 				</Card.Content>
 			</Card.Root>
 
 			<Card.Root
-				class="relative overflow-hidden border-0 bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-sm"
+				class="relative overflow-hidden border-0 bg-gradient-to-br text-white shadow-sm transition-colors duration-500 {protectionStatus ===
+				'protected'
+					? 'from-green-500 to-emerald-600'
+					: protectionStatus === 'underprotected'
+						? 'from-red-500 to-rose-600'
+						: protectionStatus === 'overprotected'
+							? 'from-amber-500 to-orange-600'
+							: 'from-purple-500 to-indigo-600'}"
 			>
 				<div
 					class="absolute top-0 right-0 -mt-6 -mr-6 h-24 w-24 rounded-full bg-white opacity-10 blur-2xl"
 				></div>
-				<Card.Header class="pb-2 text-purple-100">
-					<Card.Title class="flex items-center gap-2 text-sm font-medium text-purple-100">
+				<Card.Header class="pb-2 text-white/90">
+					<Card.Title class="flex items-center gap-2 text-sm font-medium text-white/90">
 						<BrainCircuit class="h-4 w-4" />
 						AI Prediction
 					</Card.Title>
 				</Card.Header>
 				<Card.Content>
-					<div class="text-2xl font-bold">
-						{latestPredictedV !== undefined ? latestPredictedV.toFixed(2) : 'N/A'}
-						<span class="text-sm font-normal text-purple-200">V (Forecast)</span>
+					<div class="flex items-end justify-between">
+						<div class="text-2xl font-bold">
+							{latestPredictedV !== undefined ? latestPredictedV.toFixed(0) : 'N/A'}
+							<span class="text-sm font-normal text-white/80">mV (Forecast)</span>
+						</div>
+						{#if protectionStatus !== 'unknown'}
+							<span
+								class="mb-1 rounded-full bg-white/20 px-2.5 py-0.5 text-[10px] font-bold tracking-wider text-white uppercase shadow-sm backdrop-blur-sm"
+							>
+								{protectionStatus}
+							</span>
+						{/if}
 					</div>
 				</Card.Content>
 			</Card.Root>

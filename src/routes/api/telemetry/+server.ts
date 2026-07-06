@@ -152,11 +152,11 @@ export const GET: RequestHandler = async ({ url }) => {
       datasets.busV.push(getVal('bus_voltage_V'));
       datasets.busI.push(getVal('current_mA'));
       datasets.TbusI.push(getVal('target_current_mA'));
-      datasets.electrodeV.push(getVal('electrode_V'));
+      datasets.electrodeV.push(getVal('electrode_V') ? getVal('electrode_V') * -1 : null);
       datasets.humidity.push(getVal('soil_humidity_V'));
 
       if (config.model) {
-        datasets.predictedV.push(getPrediction(config.model));
+        datasets.predictedV.push(getPrediction(config.model) ? getPrediction(config.model) * -1 : null);
       } else {
         datasets.predictedV.push(null);
       }
